@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>quaddraw — infinite canvas</title>
+    <script src="./index.ts" type="module"></script>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <section class="canvas-area" id="canvasArea">
+          <aside class="toolbar" aria-label="Drawing tools">
+            <button class="tool active" data-tool="pen" title="Pen (P)"><span>✎</span></button>
+            <button class="tool" data-tool="eraser" title="Eraser (E)"><span>⌫</span></button>
+            <div class="toolbar-rule"></div>
+            <button class="tool" data-tool="hand" title="Pan (H)"><span>✋</span></button>
+            <div class="toolbar-rule"></div>
+            <button class="tool" id="undo" title="Undo (⌘ Z)"><span>↶</span></button>
+            <button class="tool" id="redo" title="Redo (⇧ ⌘ Z)"><span>↷</span></button>
+          </aside>
+          <canvas id="drawingCanvas"></canvas>
+          <div class="canvas-hint" id="canvasHint"><kbd>Space</kbd> + drag to pan &nbsp;·&nbsp; scroll to zoom</div>
+          <aside class="inspector" id="inspector">
+            <div class="inspector-header"><span>STROKE</span></div>
+            <label>Color</label>
+            <div class="swatches" id="swatches">
+              <button data-color="#393b42" style="--swatch:#393b42" class="selected"></button><button data-color="#f35b4c" style="--swatch:#f35b4c"></button><button data-color="#f6ba38" style="--swatch:#f6ba38"></button><button data-color="#53b66e" style="--swatch:#53b66e"></button><button data-color="#4c8deb" style="--swatch:#4c8deb"></button><button data-color="#8855d4" style="--swatch:#8855d4"></button>
+            </div>
+            <label>Weight <div class="weight-row"><input id="weight" type="range" min="1" max="14" value="3" /><output id="weightValue">3 px</output></div></label>
+          </aside>
+          <div class="zoom-controls"><button id="zoomOut">−</button><button id="zoomLevel">100%</button><button id="zoomIn">＋</button></div>
+          <div class="minimap"><canvas id="minimapCanvas" width="176" height="111"></canvas><span class="mini-label">OVERVIEW</span></div>
+        </section>
+      </section>
+
+      <footer class="statusbar">
+        <div class="status-left">
+          <span id="coordinateReadout">X: 0 &nbsp; Y: 0</span>
+          <span class="status-divider"></span>
+          <span><span class="tree-dot"></span> Quadtree · <span id="strokeCount">0</span> strokes · <span id="nodeCount">1</span> node</span>
+        </div>
+        <div class="status-right"><button id="exportButton">Export</button><button id="clearButton" class="clear">Clear canvas</button></div>
+      </footer>
+    </main>
+    <div class="toast" id="toast">Canvas exported as PNG</div>
+  </body>
+</html>
