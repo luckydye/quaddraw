@@ -52,4 +52,23 @@ describe("RasterQuadTree", () => {
     expect(tree.cellsIn({ x: -1, y: 6, width: 2, height: 1 })).toHaveLength(0);
     expect(tree.cellsIn({ x: 38, y: 6, width: 2, height: 1 }).length).toBeGreaterThan(0);
   });
+
+  test("does not accumulate alpha where same-color brush sections overlap", () => {
+    const once = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 30, y: 10 },
+      3,
+      3,
+      "#393b42",
+    );
+    const twice = once.paintSegment(
+      { x: 0, y: 0 },
+      { x: 30, y: 10 },
+      3,
+      3,
+      "#393b42",
+    );
+
+    expect(twice.snapshot()).toEqual(once.snapshot());
+  });
 });

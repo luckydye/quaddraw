@@ -211,6 +211,15 @@ function composite(current: number, paint: number, coverage: number, erase: bool
     return alpha === 0 ? TRANSPARENT : withAlpha(current, alpha);
   }
 
+  // Adjacent flattened curve sections overlap at their round caps. Repeated
+  // source-over blending would accumulate alpha there and expose a chain of
+  // circles. Same-color paint represents one coverage mask, so union it by
+  // taking the strongest coverage instead.
+  if ((current & 0xffffff00) === (paint & 0xffffff00) && currentAlpha > 0) {
+    const alpha = Math.max(current & 0xff, Math.round(coverage * 255));
+    return withAlpha(paint, alpha);
+  }
+
   const outputAlpha = coverage + currentAlpha * (1 - coverage);
   if (outputAlpha <= 0) return TRANSPARENT;
   const currentWeight = currentAlpha * (1 - coverage);
