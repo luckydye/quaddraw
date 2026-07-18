@@ -1,4 +1,4 @@
-import { RasterQuadTree, type QuadNode } from "./quadtree";
+import { createBranchNode, RasterQuadTree, type QuadNode } from "./quadtree";
 import { WORLD_BOUNDS } from "./types";
 
 const DATABASE_NAME = "quaddraw";
@@ -168,7 +168,7 @@ function readPackedTree(reader: BinaryReader): QuadNode {
       return { color };
     }
     if (tag === TAG_RAW_COLOR) return { color: reader.readUint32() };
-    return { children: [readNode(), readNode(), readNode(), readNode()] };
+    return createBranchNode([readNode(), readNode(), readNode(), readNode()]);
   };
 
   const root = readNode();
@@ -180,9 +180,12 @@ function readLegacyNode(reader: BinaryReader): QuadNode {
   const kind = reader.readUint8();
   if (kind === 0) return { color: reader.readUint32() };
   if (kind !== 1) throw new Error("Invalid legacy raster quadtree node");
-  return {
-    children: [readLegacyNode(reader), readLegacyNode(reader), readLegacyNode(reader), readLegacyNode(reader)],
-  };
+  return createBranchNode([
+    readLegacyNode(reader),
+    readLegacyNode(reader),
+    readLegacyNode(reader),
+    readLegacyNode(reader),
+  ]);
 }
 
 function openDatabase(): Promise<IDBDatabase> {

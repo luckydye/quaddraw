@@ -1,18 +1,46 @@
 import { rgbaToCss } from "./quadtree";
+import {
+  PACKED_CELL_BYTES,
+  PACKED_DEBUG_REGION_FLOATS,
+  type WorkerRenderRequest,
+  type WorkerRenderResult,
+} from "./render-worker-protocol";
+import { createRenderWorker } from "./render-worker";
+import { WORLD_BOUNDS } from "./types";
 import type { Bounds, Camera, Point, QuadDebugRegion, RasterCell } from "./types";
 
 const GRID_SIZE = 40;
 const MINIMAP_SCALE = 0.012;
+const OVERVIEW_SCALE = 0.08;
+const CACHE_MARGIN_FACTOR = 0.2;
 
 /** Renders colored quadtree regions without reconstructing vector paths. */
 export class CanvasRenderer {
+  readonly overviewScale = OVERVIEW_SCALE;
   private readonly context: CanvasRenderingContext2D;
+  private readonly overviewCanvas = document.createElement("canvas");
+  private readonly overviewContext: CanvasRenderingContext2D;
   private readonly committedTreeCanvas = document.createElement("canvas");
   private readonly committedTreeContext: CanvasRenderingContext2D;
   private readonly treeCanvas = document.createElement("canvas");
   private readonly treeContext: CanvasRenderingContext2D;
   private readonly minimapContext: CanvasRenderingContext2D;
   private committedCamera: Camera = { x: 0, y: 0, zoom: 1 };
+  private committedWorldBounds: Bounds | null = null;
+  private cacheMarginX = 0;
+  private cacheMarginY = 0;
+  private cacheWidth = 0;
+  private cacheHeight = 0;
+  private pixelScale = 1;
+  private renderWorker: Worker | null = null;
+  private renderRequestId = 0;
+  private pendingWorkerRender: {
+    id: number;
+    camera: Camera;
+    worldBounds: Bounds;
+    onReady: () => void;
+    onFailure: () => void;
+  } | null = null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -20,23 +48,35 @@ export class CanvasRenderer {
     private readonly area: HTMLElement,
   ) {
     this.context = canvas.getContext("2d")!;
+    this.overviewContext = this.overviewCanvas.getContext("2d")!;
     this.committedTreeContext = this.committedTreeCanvas.getContext("2d")!;
     this.treeContext = this.treeCanvas.getContext("2d")!;
     this.minimapContext = minimap.getContext("2d")!;
+    this.overviewCanvas.width = Math.ceil(WORLD_BOUNDS.width * OVERVIEW_SCALE);
+    this.overviewCanvas.height = Math.ceil(WORLD_BOUNDS.height * OVERVIEW_SCALE);
+    this.initializeRenderWorker();
   }
 
   resize(): void {
     const bounds = this.area.getBoundingClientRect();
     const scale = window.devicePixelRatio;
+    this.pixelScale = scale;
     this.canvas.width = bounds.width * scale;
     this.canvas.height = bounds.height * scale;
     this.context.setTransform(scale, 0, 0, scale, 0, 0);
-    this.committedTreeCanvas.width = bounds.width * scale;
-    this.committedTreeCanvas.height = bounds.height * scale;
+    this.cacheMarginX = bounds.width * CACHE_MARGIN_FACTOR;
+    this.cacheMarginY = bounds.height * CACHE_MARGIN_FACTOR;
+    this.cacheWidth = bounds.width + this.cacheMarginX * 2;
+    this.cacheHeight = bounds.height + this.cacheMarginY * 2;
+    this.committedTreeCanvas.width = this.cacheWidth * scale;
+    this.committedTreeCanvas.height = this.cacheHeight * scale;
     this.committedTreeContext.setTransform(scale, 0, 0, scale, 0, 0);
     this.treeCanvas.width = bounds.width * scale;
     this.treeCanvas.height = bounds.height * scale;
     this.treeContext.setTransform(scale, 0, 0, scale, 0, 0);
+    this.committedWorldBounds = null;
+    this.renderRequestId += 1;
+    this.pendingWorkerRender = null;
   }
 
   screenToWorld(event: PointerEvent, camera: Camera): Point {
@@ -53,17 +93,21 @@ export class CanvasRenderer {
     cells: readonly RasterCell[],
     debugRegions: readonly QuadDebugRegion[],
     redrawTree: boolean,
+    renderedWorldBounds: Bounds | null,
   ): void {
     const viewport = this.area.getBoundingClientRect();
     if (redrawTree) {
-      this.committedTreeContext.clearRect(0, 0, viewport.width, viewport.height);
+      this.renderRequestId += 1;
+      this.pendingWorkerRender = null;
+      this.committedTreeContext.clearRect(0, 0, this.cacheWidth, this.cacheHeight);
       this.committedTreeContext.save();
-      this.committedTreeContext.translate(camera.x, camera.y);
+      this.committedTreeContext.translate(camera.x + this.cacheMarginX, camera.y + this.cacheMarginY);
       this.committedTreeContext.scale(camera.zoom, camera.zoom);
       this.drawCells(cells, this.committedTreeContext);
       this.drawDebugRegions(debugRegions, this.committedTreeContext, camera.zoom);
       this.committedTreeContext.restore();
       this.committedCamera = { ...camera };
+      this.committedWorldBounds = renderedWorldBounds ?? this.renderBounds(camera);
     }
 
     this.treeContext.clearRect(0, 0, viewport.width, viewport.height);
@@ -73,17 +117,78 @@ export class CanvasRenderer {
     this.context.drawImage(this.treeCanvas, 0, 0, viewport.width, viewport.height);
   }
 
+  /** Queues a committed-cache rasterization without blocking the UI thread. */
+  renderTreeOffThread(
+    camera: Camera,
+    cells: readonly RasterCell[],
+    debugRegions: readonly QuadDebugRegion[],
+    renderedWorldBounds: Bounds,
+    onReady: () => void,
+  ): boolean {
+    if (!this.renderWorker) return false;
+
+    const id = ++this.renderRequestId;
+    const cellsBuffer = packCells(cells);
+    const debugBuffer = packDebugRegions(debugRegions);
+    const request: WorkerRenderRequest = {
+      type: "render",
+      id,
+      width: this.committedTreeCanvas.width,
+      height: this.committedTreeCanvas.height,
+      pixelScale: this.pixelScale,
+      cameraX: camera.x,
+      cameraY: camera.y,
+      zoom: camera.zoom,
+      marginX: this.cacheMarginX,
+      marginY: this.cacheMarginY,
+      cells: cellsBuffer,
+      debugRegions: debugBuffer,
+    };
+    this.pendingWorkerRender = {
+      id,
+      camera: { ...camera },
+      worldBounds: { ...renderedWorldBounds },
+      onReady,
+      onFailure: () => {
+        this.render(camera, cells, debugRegions, true, renderedWorldBounds);
+        onReady();
+      },
+    };
+    try {
+      this.renderWorker.postMessage(request, [cellsBuffer, debugBuffer]);
+      return true;
+    } catch {
+      this.pendingWorkerRender = null;
+      this.renderWorker.terminate();
+      this.renderWorker = null;
+      return false;
+    }
+  }
+
   renderMinimap(camera: Camera, cells: readonly RasterCell[]): void {
     const { width, height } = this.minimap;
+    this.overviewContext.clearRect(0, 0, this.overviewCanvas.width, this.overviewCanvas.height);
+    this.overviewContext.save();
+    this.overviewContext.translate(-WORLD_BOUNDS.x * OVERVIEW_SCALE, -WORLD_BOUNDS.y * OVERVIEW_SCALE);
+    this.overviewContext.scale(OVERVIEW_SCALE, OVERVIEW_SCALE);
+    this.drawCells(cells, this.overviewContext);
+    this.overviewContext.restore();
+
     this.minimapContext.clearRect(0, 0, width, height);
     this.minimapContext.fillStyle = "#fbfbfb";
     this.minimapContext.fillRect(0, 0, width, height);
     this.drawMinimapGrid(width, height);
-    this.minimapContext.save();
-    this.minimapContext.translate(width / 2, height / 2);
-    this.minimapContext.scale(MINIMAP_SCALE, MINIMAP_SCALE);
-    this.drawCells(cells, this.minimapContext);
-    this.minimapContext.restore();
+    this.minimapContext.drawImage(
+      this.overviewCanvas,
+      0,
+      0,
+      this.overviewCanvas.width,
+      this.overviewCanvas.height,
+      width / 2 + WORLD_BOUNDS.x * MINIMAP_SCALE,
+      height / 2 + WORLD_BOUNDS.y * MINIMAP_SCALE,
+      WORLD_BOUNDS.width * MINIMAP_SCALE,
+      WORLD_BOUNDS.height * MINIMAP_SCALE,
+    );
     this.minimapContext.strokeStyle = "#6466c9";
     this.minimapContext.lineWidth = 1;
     this.minimapContext.strokeRect(
@@ -103,7 +208,59 @@ export class CanvasRenderer {
     };
   }
 
+  renderBounds(camera: Camera): Bounds {
+    return {
+      x: (-camera.x - this.cacheMarginX) / camera.zoom,
+      y: (-camera.y - this.cacheMarginY) / camera.zoom,
+      width: this.cacheWidth / camera.zoom,
+      height: this.cacheHeight / camera.zoom,
+    };
+  }
+
   toDataUrl(): string { return this.canvas.toDataURL("image/png"); }
+
+  private initializeRenderWorker(): void {
+    if (typeof OffscreenCanvas === "undefined" || typeof Worker === "undefined") return;
+    if (!("transferToImageBitmap" in OffscreenCanvas.prototype)) return;
+
+    try {
+      const worker = createRenderWorker();
+      worker.addEventListener("message", (event: MessageEvent<WorkerRenderResult>) => {
+        if (event.data.type !== "rendered") return;
+        const pending = this.pendingWorkerRender;
+        if (!pending || event.data.id !== pending.id) {
+          event.data.bitmap.close();
+          return;
+        }
+
+        this.committedTreeContext.save();
+        this.committedTreeContext.setTransform(1, 0, 0, 1, 0, 0);
+        this.committedTreeContext.clearRect(
+          0,
+          0,
+          this.committedTreeCanvas.width,
+          this.committedTreeCanvas.height,
+        );
+        this.committedTreeContext.drawImage(event.data.bitmap, 0, 0);
+        this.committedTreeContext.restore();
+        event.data.bitmap.close();
+        this.committedCamera = pending.camera;
+        this.committedWorldBounds = pending.worldBounds;
+        this.pendingWorkerRender = null;
+        pending.onReady();
+      });
+      worker.addEventListener("error", () => {
+        const pending = this.pendingWorkerRender;
+        worker.terminate();
+        if (this.renderWorker === worker) this.renderWorker = null;
+        this.pendingWorkerRender = null;
+        if (pending) pending.onFailure();
+      });
+      this.renderWorker = worker;
+    } catch {
+      this.renderWorker = null;
+    }
+  }
 
   private drawCells(cells: readonly RasterCell[], context: CanvasRenderingContext2D): void {
     const regionsByColor = new Map<number, RasterCell[]>();
@@ -159,15 +316,80 @@ export class CanvasRenderer {
   }
 
   private drawTreeForCamera(viewport: DOMRect, camera: Camera): void {
+    this.drawOverviewForCamera(camera);
+
+    // The overview is only a fallback for world space outside the detailed
+    // cache. Remove it beneath the cache before compositing; otherwise its
+    // enlarged pixels show through the detailed stroke's antialiased edges.
+    if (this.committedWorldBounds) {
+      const coverageLeft = Math.max(0, this.committedWorldBounds.x * camera.zoom + camera.x);
+      const coverageTop = Math.max(0, this.committedWorldBounds.y * camera.zoom + camera.y);
+      const coverageRight = Math.min(
+        viewport.width,
+        (this.committedWorldBounds.x + this.committedWorldBounds.width) * camera.zoom + camera.x,
+      );
+      const coverageBottom = Math.min(
+        viewport.height,
+        (this.committedWorldBounds.y + this.committedWorldBounds.height) * camera.zoom + camera.y,
+      );
+      if (coverageRight > coverageLeft && coverageBottom > coverageTop) {
+        this.treeContext.clearRect(
+          coverageLeft,
+          coverageTop,
+          coverageRight - coverageLeft,
+          coverageBottom - coverageTop,
+        );
+      }
+    }
+
     const zoomRatio = camera.zoom / this.committedCamera.zoom;
-    const targetX = camera.x - this.committedCamera.x * zoomRatio;
-    const targetY = camera.y - this.committedCamera.y * zoomRatio;
+    const targetX = camera.x - (this.committedCamera.x + this.cacheMarginX) * zoomRatio;
+    const targetY = camera.y - (this.committedCamera.y + this.cacheMarginY) * zoomRatio;
+
+    // Copy only the visible portion of the oversized cache. The previous
+    // 5-argument drawImage call asked Canvas to resample the entire cache and
+    // relied on clipping, which becomes costly on high-DPI, zoomed-out views.
+    const sourceX = Math.max(0, -targetX / zoomRatio);
+    const sourceY = Math.max(0, -targetY / zoomRatio);
+    const sourceRight = Math.min(this.cacheWidth, (viewport.width - targetX) / zoomRatio);
+    const sourceBottom = Math.min(this.cacheHeight, (viewport.height - targetY) / zoomRatio);
+    const sourceWidth = sourceRight - sourceX;
+    const sourceHeight = sourceBottom - sourceY;
+    if (sourceWidth <= 0 || sourceHeight <= 0) return;
+
+    const destinationX = targetX + sourceX * zoomRatio;
+    const destinationY = targetY + sourceY * zoomRatio;
     this.treeContext.drawImage(
       this.committedTreeCanvas,
-      targetX,
-      targetY,
-      viewport.width * zoomRatio,
-      viewport.height * zoomRatio,
+      sourceX * this.pixelScale,
+      sourceY * this.pixelScale,
+      sourceWidth * this.pixelScale,
+      sourceHeight * this.pixelScale,
+      destinationX,
+      destinationY,
+      sourceWidth * zoomRatio,
+      sourceHeight * zoomRatio,
+    );
+  }
+
+  private drawOverviewForCamera(camera: Camera): void {
+    const viewport = this.viewportBounds(camera);
+    const left = Math.max(viewport.x, WORLD_BOUNDS.x);
+    const top = Math.max(viewport.y, WORLD_BOUNDS.y);
+    const right = Math.min(viewport.x + viewport.width, WORLD_BOUNDS.x + WORLD_BOUNDS.width);
+    const bottom = Math.min(viewport.y + viewport.height, WORLD_BOUNDS.y + WORLD_BOUNDS.height);
+    if (right <= left || bottom <= top) return;
+
+    this.treeContext.drawImage(
+      this.overviewCanvas,
+      (left - WORLD_BOUNDS.x) * OVERVIEW_SCALE,
+      (top - WORLD_BOUNDS.y) * OVERVIEW_SCALE,
+      (right - left) * OVERVIEW_SCALE,
+      (bottom - top) * OVERVIEW_SCALE,
+      left * camera.zoom + camera.x,
+      top * camera.zoom + camera.y,
+      (right - left) * camera.zoom,
+      (bottom - top) * camera.zoom,
     );
   }
 
@@ -183,4 +405,32 @@ export class CanvasRenderer {
     context.lineTo(toX, toY);
     context.stroke();
   }
+}
+
+function packCells(cells: readonly RasterCell[]): ArrayBuffer {
+  const buffer = new ArrayBuffer(cells.length * PACKED_CELL_BYTES);
+  const view = new DataView(buffer);
+  cells.forEach((cell, index) => {
+    const offset = index * PACKED_CELL_BYTES;
+    view.setFloat32(offset, cell.bounds.x, true);
+    view.setFloat32(offset + 4, cell.bounds.y, true);
+    view.setFloat32(offset + 8, cell.bounds.width, true);
+    view.setFloat32(offset + 12, cell.bounds.height, true);
+    view.setUint32(offset + 16, cell.color, true);
+  });
+  return buffer;
+}
+
+function packDebugRegions(regions: readonly QuadDebugRegion[]): ArrayBuffer {
+  const packed = new Float32Array(regions.length * PACKED_DEBUG_REGION_FLOATS);
+  regions.forEach((region, index) => {
+    const offset = index * PACKED_DEBUG_REGION_FLOATS;
+    packed[offset] = region.bounds.x;
+    packed[offset + 1] = region.bounds.y;
+    packed[offset + 2] = region.bounds.width;
+    packed[offset + 3] = region.bounds.height;
+    packed[offset + 4] = region.depth;
+    packed[offset + 5] = region.occupied ? 1 : 0;
+  });
+  return packed.buffer;
 }

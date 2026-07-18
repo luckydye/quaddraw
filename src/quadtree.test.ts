@@ -71,4 +71,17 @@ describe("RasterQuadTree", () => {
 
     expect(twice.snapshot()).toEqual(once.snapshot());
   });
+
+  test("aggregates subpixel branches when rendering zoomed out", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: -200, y: -100 },
+      { x: 200, y: 100 },
+      12,
+      12,
+      "#4c8deb",
+    );
+
+    expect(tree.cellsForRendering(WORLD_BOUNDS, 0.1).length).toBeLessThan(tree.allCells().length);
+    expect(tree.debugLeavesIn(WORLD_BOUNDS, 0.1).length).toBeLessThan(tree.debugLeavesIn(WORLD_BOUNDS).length);
+  });
 });

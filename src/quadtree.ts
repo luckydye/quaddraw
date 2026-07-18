@@ -1,11 +1,17 @@
 import type { Bounds, Point, QuadDebugRegion, RasterCell } from "./types";
 
-export type QuadNode =
-  | { readonly color: number; readonly children?: undefined }
-  | { readonly color?: undefined; readonly children: readonly [QuadNode, QuadNode, QuadNode, QuadNode] };
+export type QuadLeafNode = { readonly color: number; readonly children?: undefined };
+export type QuadBranchNode = {
+  readonly color?: undefined;
+  readonly children: readonly [QuadNode, QuadNode, QuadNode, QuadNode];
+  readonly average: number;
+  readonly nodeCount: number;
+};
+export type QuadNode = QuadLeafNode | QuadBranchNode;
 
 const TRANSPARENT = 0;
 const MAX_DEPTH = 15;
+const MAX_LOD_CELL_PIXELS = 1.25;
 
 /**
  * A persistent sparse raster. Every uniform region is one node; brush edges
@@ -45,7 +51,31 @@ export class RasterQuadTree {
 
   cellsIn(area: Bounds): RasterCell[] {
     const cells: RasterCell[] = [];
-    collectCells(this.root, this.bounds, area, cells);
+    collectCells(
+      this.root,
+      this.bounds.x,
+      this.bounds.y,
+      this.bounds.width,
+      this.bounds.height,
+      area,
+      cells,
+    );
+    return cells;
+  }
+
+  cellsForRendering(area: Bounds, scale: number): RasterCell[] {
+    if (scale >= 1) return this.cellsIn(area);
+    const cells: RasterCell[] = [];
+    collectRenderCells(
+      this.root,
+      this.bounds.x,
+      this.bounds.y,
+      this.bounds.width,
+      this.bounds.height,
+      area,
+      Math.max(scale, 0.0001),
+      cells,
+    );
     return cells;
   }
 
@@ -53,14 +83,14 @@ export class RasterQuadTree {
     return this.cellsIn(this.bounds);
   }
 
-  debugLeavesIn(area: Bounds): QuadDebugRegion[] {
+  debugLeavesIn(area: Bounds, scale = 1): QuadDebugRegion[] {
     const regions: QuadDebugRegion[] = [];
-    collectDebugLeaves(this.root, this.bounds, area, 0, regions);
+    collectDebugLeaves(this.root, this.bounds, area, Math.max(scale, 0.0001), 0, regions);
     return regions;
   }
 
   countNodes(): number {
-    return countNodes(this.root);
+    return isBranchNode(this.root) ? this.root.nodeCount : 1;
   }
 
   snapshot(): QuadNode {
@@ -141,49 +171,100 @@ function paintNode(
     return uniform(firstColor);
   }
 
-  return { children };
+  return createBranchNode(children);
 }
 
-function collectCells(node: QuadNode, bounds: Bounds, area: Bounds, cells: RasterCell[]): void {
-  if (!rectanglesIntersect(bounds, area)) return;
+function collectCells(
+  node: QuadNode,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  area: Bounds,
+  cells: RasterCell[],
+): void {
+  if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
 
-  if (node.color !== undefined) {
-    if ((node.color & 0xff) !== 0) cells.push({ bounds, color: node.color });
+  if (node.children === undefined) {
+    if ((node.color & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: node.color });
     return;
   }
 
-  const childBounds = splitBounds(bounds);
-  node.children.forEach((child, index) => collectCells(child, childBounds[index], area, cells));
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  collectCells(node.children[0], x, y, halfWidth, halfHeight, area, cells);
+  collectCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, cells);
+  collectCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, cells);
+  collectCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, cells);
+}
+
+function collectRenderCells(
+  node: QuadNode,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  area: Bounds,
+  scale: number,
+  cells: RasterCell[],
+): void {
+  if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
+  if (node.children === undefined) {
+    if ((node.color & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: node.color });
+    return;
+  }
+  const branch = node as QuadBranchNode;
+
+  if (Math.max(width, height) * scale <= MAX_LOD_CELL_PIXELS) {
+    if ((branch.average & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: branch.average });
+    return;
+  }
+
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  collectRenderCells(branch.children[0], x, y, halfWidth, halfHeight, area, scale, cells);
+  collectRenderCells(branch.children[1], x + halfWidth, y, halfWidth, halfHeight, area, scale, cells);
+  collectRenderCells(branch.children[2], x, y + halfHeight, halfWidth, halfHeight, area, scale, cells);
+  collectRenderCells(branch.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, scale, cells);
 }
 
 function collectDebugLeaves(
   node: QuadNode,
   bounds: Bounds,
   area: Bounds,
+  scale: number,
   depth: number,
   regions: QuadDebugRegion[],
 ): void {
   if (!rectanglesIntersect(bounds, area)) return;
-  if (node.color !== undefined) {
+  if (!isBranchNode(node)) {
     regions.push({ bounds, depth, occupied: (node.color & 0xff) !== 0 });
+    return;
+  }
+
+  if (scale < 1 && Math.max(bounds.width, bounds.height) * scale <= MAX_LOD_CELL_PIXELS) {
+    regions.push({ bounds, depth, occupied: (node.average & 0xff) !== 0 });
     return;
   }
 
   const childBounds = splitBounds(bounds);
   node.children.forEach((child, index) =>
-    collectDebugLeaves(child, childBounds[index], area, depth + 1, regions)
+    collectDebugLeaves(child, childBounds[index], area, scale, depth + 1, regions)
   );
 }
 
-function countNodes(node: QuadNode): number {
-  return 1 + (node.children?.reduce((total, child) => total + countNodes(child), 0) ?? 0);
+function representativeColor(node: QuadNode): number {
+  return isBranchNode(node) ? node.average : node.color;
 }
 
-function representativeColor(node: QuadNode): number {
-  if (node.color !== undefined) return node.color;
-  // This is only used if a restored tree is deeper than the configured raster
-  // resolution. Averaging keeps such snapshots renderable without path data.
-  const colors = node.children.map(representativeColor);
+function isBranchNode(node: QuadNode): node is QuadBranchNode {
+  return node.children !== undefined;
+}
+
+export function createBranchNode(
+  children: readonly [QuadNode, QuadNode, QuadNode, QuadNode],
+): QuadNode {
+  const colors = children.map(representativeColor);
   const totals = colors.reduce(
     (sum, color) => {
       const alpha = color & 0xff;
@@ -195,13 +276,19 @@ function representativeColor(node: QuadNode): number {
     },
     { red: 0, green: 0, blue: 0, alpha: 0 },
   );
-  if (totals.alpha === 0) return TRANSPARENT;
-  return packColor(
-    Math.round(totals.red / totals.alpha),
-    Math.round(totals.green / totals.alpha),
-    Math.round(totals.blue / totals.alpha),
-    Math.round(totals.alpha / 4),
+  const average = totals.alpha === 0
+    ? TRANSPARENT
+    : packColor(
+      Math.round(totals.red / totals.alpha),
+      Math.round(totals.green / totals.alpha),
+      Math.round(totals.blue / totals.alpha),
+      Math.round(totals.alpha / 4),
+    );
+  const nodeCount = 1 + children.reduce(
+    (total, child) => total + (isBranchNode(child) ? child.nodeCount : 1),
+    0,
   );
+  return { children, average, nodeCount };
 }
 
 function composite(current: number, paint: number, coverage: number, erase: boolean): number {

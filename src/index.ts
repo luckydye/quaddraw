@@ -1,6 +1,6 @@
 import { CanvasRenderer } from "./canvas-renderer";
 import { DrawingStore } from "./drawing-store";
-import type { BrushAction, Camera, Point, QuadDebugRegion, RasterCell, Tool } from "./types";
+import type { Bounds, BrushAction, Camera, Point, QuadDebugRegion, RasterCell, Tool } from "./types";
 
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 4;
@@ -34,6 +34,7 @@ let activeColor = "#393b42";
 let currentAction: BrushAction | null = null;
 let visibleCells: readonly RasterCell[] = [];
 let visibleDebugRegions: readonly QuadDebugRegion[] = [];
+let renderedWorldBounds: Bounds | null = null;
 let debugQuadtree = false;
 let isPanning = false;
 let isSpacePressed = false;
@@ -48,26 +49,41 @@ function requiredElement<T extends Element>(selector: string): T {
   return element;
 }
 
-function render(redrawTree = true, redrawMinimap = redrawTree): void {
+function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false): void {
   if (redrawTree) {
-    const viewport = renderer.viewportBounds(camera);
-    visibleCells = store.visibleIn(viewport);
-    visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(viewport) : [];
+    const viewport = currentAction ? renderer.viewportBounds(camera) : renderer.renderBounds(camera);
+    renderedWorldBounds = viewport;
+    visibleCells = store.visibleIn(viewport, camera.zoom);
+    visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(viewport, camera.zoom) : [];
   }
 
-  renderer.render(camera, visibleCells, visibleDebugRegions, redrawTree);
+  const workerAccepted = redrawTree
+    && offThread
+    && renderedWorldBounds !== null
+    && renderer.renderTreeOffThread(
+      camera,
+      visibleCells,
+      visibleDebugRegions,
+      renderedWorldBounds,
+      () => renderer.render(camera, visibleCells, visibleDebugRegions, false, renderedWorldBounds),
+    );
+  renderer.render(camera, visibleCells, visibleDebugRegions, redrawTree && !workerAccepted, renderedWorldBounds);
   if (redrawMinimap) {
-    renderer.renderMinimap(camera, store.allCells());
+    renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
   }
   updateStatus();
 }
 
 function updateStatus(): void {
-  elements.strokeCount.textContent = String(store.strokeCount);
-  elements.nodeCount.textContent = String(store.nodeCount);
-  elements.snapshotCompressedSize.textContent = formatByteSize(store.snapshotSizes.compressedBytes);
-  elements.snapshotUncompressedSize.textContent = formatByteSize(store.snapshotSizes.uncompressedBytes);
-  elements.zoomLevel.textContent = `${Math.round(camera.zoom * 100)}%`;
+  setText(elements.strokeCount, String(store.strokeCount));
+  setText(elements.nodeCount, String(store.nodeCount));
+  setText(elements.snapshotCompressedSize, formatByteSize(store.snapshotSizes.compressedBytes));
+  setText(elements.snapshotUncompressedSize, formatByteSize(store.snapshotSizes.uncompressedBytes));
+  setText(elements.zoomLevel, `${Math.round(camera.zoom * 100)}%`);
+}
+
+function setText(element: HTMLElement, value: string): void {
+  if (element.textContent !== value) element.textContent = value;
 }
 
 function formatByteSize(bytes: number): string {
@@ -119,9 +135,14 @@ function normalizedWheelDelta(event: WheelEvent): number {
 }
 
 function renderViewportPreview(): void {
-  render(false);
+  // Transform the detailed cache immediately. A whole-world quadtree LOD sits
+  // behind it, so newly exposed areas remain visible without rebuilding the
+  // expensive full-resolution cache during the navigation gesture.
+  render(false, false);
   window.clearTimeout(viewportSettleTimer);
-  viewportSettleTimer = window.setTimeout(() => render(true), 120);
+  viewportSettleTimer = window.setTimeout(() => {
+    render(true, true, true);
+  }, 120);
 }
 
 function beginDrawing(point: Point): void {
@@ -131,6 +152,7 @@ function beginDrawing(point: Point): void {
 }
 
 function finishInteraction(): void {
+  const finishedPanning = isPanning && currentAction === null;
   if (currentAction) {
     store.commit(currentAction);
     currentAction = null;
@@ -140,7 +162,7 @@ function finishInteraction(): void {
   lastPointerPosition = null;
   elements.area.classList.remove("is-panning");
   window.clearTimeout(viewportSettleTimer);
-  render();
+  render(true, true, finishedPanning);
 }
 
 function showToast(message: string): void {

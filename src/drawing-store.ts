@@ -131,16 +131,16 @@ export class DrawingStore {
     this.persist();
   }
 
-  visibleIn(bounds: Bounds): RasterCell[] {
-    return this.tree.cellsIn(bounds);
+  visibleIn(bounds: Bounds, scale = 1): RasterCell[] {
+    return this.tree.cellsForRendering(bounds, scale);
   }
 
-  allCells(): RasterCell[] {
-    return this.tree.allCells();
+  allCells(scale = 1): RasterCell[] {
+    return this.tree.cellsForRendering(WORLD_BOUNDS, scale);
   }
 
-  debugLeavesIn(bounds: Bounds): QuadDebugRegion[] {
-    return this.tree.debugLeavesIn(bounds);
+  debugLeavesIn(bounds: Bounds, scale = 1): QuadDebugRegion[] {
+    return this.tree.debugLeavesIn(bounds, scale);
   }
 
   get strokeCount(): number {
