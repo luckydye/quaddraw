@@ -1,17 +1,13 @@
 import { createBranchNode, RasterQuadTree, type QuadNode } from "./quadtree";
-import {
-  createDrawingDocument,
-  type DrawingDocument,
-  type DrawingLayer,
-} from "./drawing-document";
+import type { DrawingDocument, DrawingLayer } from "./drawing-document";
 import { WORLD_BOUNDS } from "./types";
 
 const DATABASE_NAME = "quaddraw";
 const STORE_NAME = "snapshots";
-const SNAPSHOT_KEY = "active-raster-quadtree";
-const MAGIC = 0x51445232; // "QDR2"; deliberately incompatible with path snapshots.
+const SNAPSHOT_KEY = "active-drawing-document";
+const LAYER_METADATA_KEY = "quaddraw-layer-metadata-v1";
+const MAGIC = 0x51445233; // "QDR3"
 const VERSION = 3;
-const QUADTREE_VERSION = 2;
 const MAX_PALETTE_COLORS = 255;
 const TAG_TRANSPARENT = 0;
 const TAG_BRANCH = 1;
@@ -24,10 +20,15 @@ type StoredSnapshot = {
   compression: "gzip" | "none";
 };
 
+type StoredLayerMetadata = {
+  version: 1;
+  activeLayerId: number;
+  layers: Array<Pick<DrawingLayer, "id" | "name" | "visible" | "opacity">>;
+};
+
 export type RestoredDrawing = {
   document: DrawingDocument;
   snapshotSizes: SnapshotSizes;
-  needsUpgrade: boolean;
 };
 
 export type SnapshotSizes = {
@@ -37,13 +38,6 @@ export type SnapshotSizes = {
 
 export type DecodedDrawing = {
   document: DrawingDocument;
-  version: number;
-};
-
-export type DecodedQuadTree = {
-  tree: RasterQuadTree;
-  strokeCount: number;
-  version: number;
 };
 
 /** Persists layer metadata and quadtree raster values—never input paths. */
@@ -66,18 +60,20 @@ export async function loadDrawing(): Promise<RestoredDrawing | null> {
     const database = await openDatabase();
     const snapshot = await readSnapshot(database);
     database.close();
-    if (!snapshot) return null;
+    if (!snapshot) {
+      clearLayerMetadata();
+      return null;
+    }
 
     const bytes = await decompress(snapshot);
     const decoded = decodeDrawing(bytes);
     if (!decoded) return null;
     return {
-      document: decoded.document,
+      document: applyLayerMetadata(decoded.document, readLayerMetadata()),
       snapshotSizes: {
         compressedBytes: snapshot.blob.size,
         uncompressedBytes: bytes.byteLength,
       },
-      needsUpgrade: decoded.version < VERSION,
     };
   } catch (error) {
     console.warn("Could not restore raster quadtree", error);
@@ -85,32 +81,96 @@ export async function loadDrawing(): Promise<RestoredDrawing | null> {
   }
 }
 
-/** Compatibility wrapper for callers that still save a single raster. */
-export async function saveQuadTree(
-  tree: RasterQuadTree,
-  strokeCount: number,
-): Promise<SnapshotSizes | null> {
-  return saveDrawing(createDrawingDocument(tree, strokeCount));
+/**
+ * Saves the small, frequently edited layer manifest synchronously so a page
+ * reload cannot overtake the idle-batched raster snapshot.
+ */
+export function saveLayerMetadata(document: DrawingDocument): void {
+  if (typeof localStorage === "undefined") return;
+  const metadata: StoredLayerMetadata = {
+    version: 1,
+    activeLayerId: document.activeLayerId,
+    layers: document.layers.map(({ id, name, visible, opacity }) => ({
+      id,
+      name,
+      visible,
+      opacity,
+    })),
+  };
+  try {
+    localStorage.setItem(LAYER_METADATA_KEY, JSON.stringify(metadata));
+  } catch (error) {
+    console.warn("Could not save drawing layer metadata", error);
+  }
 }
 
-/** Compatibility wrapper exposing the active raster from a layered snapshot. */
-export async function loadQuadTree(): Promise<(
-  RestoredDrawing & { tree: RasterQuadTree; strokeCount: number }
-) | null> {
-  const restored = await loadDrawing();
-  if (!restored) return null;
-  const layer = restored.document.layers.find(({ id }) => id === restored.document.activeLayerId)!;
-  return { ...restored, tree: layer.tree, strokeCount: layer.strokeCount };
+export function applyLayerMetadata(
+  document: DrawingDocument,
+  value: unknown,
+): DrawingDocument {
+  if (!isStoredLayerMetadata(value)) return document;
+  const existing = new Map(document.layers.map((layer) => [layer.id, layer]));
+  if (
+    value.layers.length !== document.layers.length
+    || value.layers.some(({ id }) => !existing.has(id))
+    || !existing.has(value.activeLayerId)
+  ) return document;
+
+  return {
+    ...document,
+    activeLayerId: value.activeLayerId,
+    layers: value.layers.map((metadata) => ({
+      ...existing.get(metadata.id)!,
+      name: metadata.name,
+      visible: metadata.visible,
+      opacity: Math.max(0, Math.min(1, metadata.opacity)),
+    })),
+  };
 }
 
-/** Encodes a compact, transfer-ready full snapshot without compression. */
-export function encodeQuadTree(tree: RasterQuadTree, strokeCount: number): Uint8Array {
-  const writer = new BinaryWriter();
-  writer.writeUint32(MAGIC);
-  writer.writeUint16(QUADTREE_VERSION);
-  writer.writeUint32(strokeCount);
-  writePackedTree(writer, collectNodes(tree.snapshot()));
-  return writer.toBytes();
+function readLayerMetadata(): unknown {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const value = localStorage.getItem(LAYER_METADATA_KEY);
+    return value === null ? null : JSON.parse(value);
+  } catch (error) {
+    console.warn("Could not restore drawing layer metadata", error);
+    return null;
+  }
+}
+
+function clearLayerMetadata(): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(LAYER_METADATA_KEY);
+  } catch {
+    // Storage can be disabled independently of IndexedDB; the raster snapshot
+    // remains usable without the layer-manifest optimization.
+  }
+}
+
+function isStoredLayerMetadata(value: unknown): value is StoredLayerMetadata {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<StoredLayerMetadata>;
+  if (
+    candidate.version !== 1
+    || !Number.isInteger(candidate.activeLayerId)
+    || !Array.isArray(candidate.layers)
+  ) return false;
+  const ids = new Set<number>();
+  return candidate.layers.every((layer) => {
+    if (typeof layer !== "object" || layer === null) return false;
+    const item = layer as Partial<StoredLayerMetadata["layers"][number]>;
+    if (
+      !Number.isInteger(item.id)
+      || ids.has(item.id!)
+      || typeof item.name !== "string"
+      || typeof item.visible !== "boolean"
+      || !Number.isFinite(item.opacity)
+    ) return false;
+    ids.add(item.id!);
+    return true;
+  });
 }
 
 /** Encodes a complete ordered layer document. */
@@ -121,32 +181,6 @@ export function encodeDrawing(document: DrawingDocument): Uint8Array {
     writeLayerHeader(writer, layer);
     writePackedTree(writer, collectNodes(layer.tree.snapshot()));
   }
-  return writer.toBytes();
-}
-
-/** Produces the same snapshot while yielding between batches of tree work. */
-export async function encodeQuadTreeIncrementally(
-  tree: RasterQuadTree,
-  strokeCount: number,
-): Promise<Uint8Array> {
-  const nodes: QuadNode[] = [];
-  const pending = [tree.snapshot()];
-  while (pending.length > 0) {
-    const node = pending.pop()!;
-    nodes.push(node);
-    if (node.children) {
-      for (let index = node.children.length - 1; index >= 0; index--) {
-        pending.push(node.children[index]);
-      }
-    }
-    if (nodes.length % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
-  }
-
-  const writer = new BinaryWriter();
-  writer.writeUint32(MAGIC);
-  writer.writeUint16(QUADTREE_VERSION);
-  writer.writeUint32(strokeCount);
-  await writePackedTreeIncrementally(writer, nodes);
   return writer.toBytes();
 }
 
@@ -270,34 +304,12 @@ function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 }
 
-/** Reads both compact version 2 snapshots and the original version 1 layout. */
-export function decodeQuadTree(bytes: Uint8Array): DecodedQuadTree | null {
-  const reader = new BinaryReader(bytes);
-  if (reader.readUint32() !== MAGIC) return null;
-  const version = reader.readUint16();
-  if (version < 1 || version > QUADTREE_VERSION) return null;
-  const strokeCount = reader.readUint32();
-  const root = version === 1 ? readLegacyNode(reader) : readPackedTree(reader);
-  return { tree: RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root), strokeCount, version };
-}
-
-/** Reads layered version 3 snapshots and promotes version 1/2 rasters to one layer. */
+/** Reads only the current layered QDR3 snapshot format. */
 export function decodeDrawing(bytes: Uint8Array): DecodedDrawing | null {
   const reader = new BinaryReader(bytes);
   if (reader.readUint32() !== MAGIC) return null;
   const version = reader.readUint16();
-  if (version < 1 || version > VERSION) return null;
-  if (version <= QUADTREE_VERSION) {
-    const strokeCount = reader.readUint32();
-    const root = version === 1 ? readLegacyNode(reader) : readPackedTree(reader);
-    return {
-      document: createDrawingDocument(
-        RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root),
-        strokeCount,
-      ),
-      version,
-    };
-  }
+  if (version !== VERSION) return null;
 
   const activeLayerId = reader.readUint32();
   const nextLayerId = reader.readUint32();
@@ -324,7 +336,7 @@ export function decodeDrawing(bytes: Uint8Array): DecodedDrawing | null {
   }
   if (!ids.has(activeLayerId)) throw new Error("Layered drawing snapshot has an invalid active layer");
   if (ids.has(nextLayerId)) throw new Error("Layered drawing snapshot reuses its next layer id");
-  return { document: { layers, activeLayerId, nextLayerId }, version };
+  return { document: { layers, activeLayerId, nextLayerId } };
 }
 
 function collectNodes(root: QuadNode): QuadNode[] {
@@ -385,18 +397,6 @@ function readPackedTree(reader: BinaryReader): QuadNode {
   const root = readNode();
   if (nodeIndex !== nodeCount) throw new Error("Raster quadtree topology did not consume every node");
   return root;
-}
-
-function readLegacyNode(reader: BinaryReader): QuadNode {
-  const kind = reader.readUint8();
-  if (kind === 0) return { color: reader.readUint32() };
-  if (kind !== 1) throw new Error("Invalid legacy raster quadtree node");
-  return createBranchNode([
-    readLegacyNode(reader),
-    readLegacyNode(reader),
-    readLegacyNode(reader),
-    readLegacyNode(reader),
-  ]);
 }
 
 function openDatabase(): Promise<IDBDatabase> {

@@ -8,7 +8,12 @@ import {
   type LayerId,
   type LayerInfo,
 } from "./drawing-document";
-import { loadDrawing, saveDrawing, type SnapshotSizes } from "./quadtree-storage";
+import {
+  loadDrawing,
+  saveDrawing,
+  saveLayerMetadata,
+  type SnapshotSizes,
+} from "./quadtree-storage";
 import type {
   Bounds,
   BrushAction,
@@ -60,7 +65,6 @@ export class DrawingStore {
     this.document = restored.document;
     this.updateOccupiedResolution();
     this.setSnapshotSizes(restored.snapshotSizes);
-    if (restored.needsUpgrade) this.persist();
   }
 
   createStroke(
@@ -171,6 +175,7 @@ export class DrawingStore {
     if (!previous) return false;
     this.redoStack.push(this.currentState());
     this.restoreState(previous);
+    saveLayerMetadata(this.document);
     this.persist();
     return true;
   }
@@ -180,6 +185,7 @@ export class DrawingStore {
     if (!next) return false;
     this.undoStack.push(this.currentState());
     this.restoreState(next);
+    saveLayerMetadata(this.document);
     this.persist();
     return true;
   }
@@ -269,7 +275,7 @@ export class DrawingStore {
     if (layerId === this.document.activeLayerId) return false;
     if (!this.document.layers.some(({ id }) => id === layerId)) return false;
     this.document = { ...this.document, activeLayerId: layerId };
-    this.persistImmediately();
+    this.persistLayerChange();
     return true;
   }
 
@@ -569,9 +575,6 @@ export class DrawingStore {
 
   private async flushPersistence(): Promise<void> {
     this.persistenceQueued = false;
-    // An immediate metadata save may overtake an already queued idle callback.
-    // The active writer will observe persistencePending and serialize the latest
-    // immutable document after its current snapshot finishes.
     if (this.persistenceWriting) return;
     this.persistenceWriting = true;
     while (this.persistencePending) {
@@ -614,14 +617,12 @@ export class DrawingStore {
     this.redoStack = [];
     this.document = document;
     this.updateOccupiedResolution();
-    this.persistImmediately();
+    this.persistLayerChange();
   }
 
-  private persistImmediately(): void {
-    if (typeof indexedDB === "undefined") return;
-    this.persistencePending = true;
-    if (this.persistenceWriting) return;
-    void this.flushPersistence();
+  private persistLayerChange(): void {
+    saveLayerMetadata(this.document);
+    this.persist();
   }
 
   private assertNoActiveAction(): void {

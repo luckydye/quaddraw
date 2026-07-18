@@ -218,4 +218,37 @@ describe("DrawingStore layers", () => {
       else Reflect.deleteProperty(globalThis, "window");
     }
   });
+
+  test("writes visibility metadata synchronously for reloads", () => {
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const previousLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const writes: string[] = [];
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { requestIdleCallback: () => 0 },
+    });
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { setItem: (_key: string, value: string) => writes.push(value) },
+    });
+
+    try {
+      const store = new DrawingStore();
+      expect(store.setLayerVisibility(store.activeLayerId, false)).toBe(true);
+      expect(store.setLayerVisibility(store.activeLayerId, true)).toBe(true);
+
+      const metadata = JSON.parse(writes.at(-1)!) as {
+        layers: Array<{ visible: boolean }>;
+      };
+      expect(metadata.layers[0].visible).toBe(true);
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (previousLocalStorage) {
+        Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
+      } else {
+        Reflect.deleteProperty(globalThis, "localStorage");
+      }
+    }
+  });
 });

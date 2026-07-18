@@ -13,8 +13,7 @@ and fills the visible colored nodes directly.
 Undo and redo retain copy-on-write document and tree roots, so unchanged layers
 and branches are shared. IndexedDB persistence stores ordered layer metadata,
 raster values, and full tree topology in the `QDR3` binary snapshot format.
-Existing `QDR1` and `QDR2` snapshots are promoted to a one-layer document when
-loaded. The compact tree layout packs four node tags per byte,
+The compact tree layout packs four node tags per byte,
 omits payloads for transparent leaves, and uses a frequency-selected color
 palette. Pointer samples are transient and are neither rendered as paths nor
 persisted.

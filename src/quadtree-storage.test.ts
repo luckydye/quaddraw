@@ -1,17 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { RasterQuadTree } from "./quadtree";
 import {
+  applyLayerMetadata,
   decodeDrawing,
-  decodeQuadTree,
   encodeDrawing,
   encodeDrawingIncrementally,
-  encodeQuadTree,
-  encodeQuadTreeIncrementally,
 } from "./quadtree-storage";
 import type { DrawingDocument } from "./drawing-document";
 import { WORLD_BOUNDS } from "./types";
 
-describe("compact quadtree snapshots", () => {
+describe("compact QDR3 snapshots", () => {
   test("round-trips topology while substantially reducing raw size", () => {
     const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
       { x: -100, y: -50 },
@@ -20,47 +18,27 @@ describe("compact quadtree snapshots", () => {
       14,
       "#8855d4",
     );
-    const bytes = encodeQuadTree(tree, 7);
-    const decoded = decodeQuadTree(bytes);
+    const document: DrawingDocument = {
+      layers: [{
+        id: 1,
+        name: "Paint",
+        visible: true,
+        opacity: 1,
+        tree,
+        strokeCount: 7,
+      }],
+      activeLayerId: 1,
+      nextLayerId: 2,
+    };
+    const bytes = encodeDrawing(document);
+    const decoded = decodeDrawing(bytes);
     const branchCount = (tree.countNodes() - 1) / 4;
-    const legacyBytes = 10 + branchCount + (tree.countNodes() - branchCount) * 5;
+    const unpackedTreeBytes = branchCount + (tree.countNodes() - branchCount) * 5;
 
     expect(decoded).not.toBeNull();
-    expect(decoded!.strokeCount).toBe(7);
-    expect(decoded!.version).toBe(2);
-    expect(decoded!.tree.snapshot()).toEqual(tree.snapshot());
-    expect(bytes.byteLength).toBeLessThan(legacyBytes / 2);
-  });
-
-  test("still reads version 1 snapshots", () => {
-    const buffer = new ArrayBuffer(15);
-    const view = new DataView(buffer);
-    view.setUint32(0, 0x51445232, true);
-    view.setUint16(4, 1, true);
-    view.setUint32(6, 3, true);
-    view.setUint8(10, 0);
-    view.setUint32(11, 0x8855d4ff, true);
-
-    const decoded = decodeQuadTree(new Uint8Array(buffer));
-
-    expect(decoded?.version).toBe(1);
-    expect(decoded?.strokeCount).toBe(3);
-    expect(decoded?.tree.snapshot()).toEqual({ color: 0x8855d4ff });
-  });
-
-  test("incremental encoding is byte-identical to synchronous encoding", async () => {
-    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
-      { x: -80, y: 40 },
-      { x: 120, y: -60 },
-      12,
-      5,
-      "#53b66e",
-    );
-
-    const synchronous = encodeQuadTree(tree, 11);
-    const incremental = await encodeQuadTreeIncrementally(tree, 11);
-
-    expect(incremental).toEqual(synchronous);
+    expect(decoded!.document.layers[0].strokeCount).toBe(7);
+    expect(decoded!.document.layers[0].tree.snapshot()).toEqual(tree.snapshot());
+    expect(bytes.byteLength).toBeLessThan(unpackedTreeBytes / 2);
   });
 });
 
@@ -94,7 +72,6 @@ describe("layered drawing snapshots", () => {
     const decoded = decodeDrawing(synchronous);
 
     expect(incremental).toEqual(synchronous);
-    expect(decoded?.version).toBe(3);
     expect(decoded?.document.activeLayerId).toBe(9);
     expect(decoded?.document.nextLayerId).toBe(10);
     expect(decoded?.document.layers.map(({ tree: _tree, ...metadata }) => metadata)).toEqual([
@@ -105,20 +82,37 @@ describe("layered drawing snapshots", () => {
     expect(decoded?.document.layers[1].tree.snapshot()).toEqual(topTree.snapshot());
   });
 
-  test("promotes a version 2 raster snapshot into a one-layer document", () => {
-    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+  test("restores the latest layer manifest without replacing raster trees", () => {
+    const firstTree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
       { x: 0, y: 0 },
-      { x: 10, y: 10 },
+      { x: 10, y: 0 },
       4,
       4,
-      "#53b66e",
+      "#f35b4c",
     );
+    const secondTree = new RasterQuadTree(WORLD_BOUNDS);
+    const document: DrawingDocument = {
+      layers: [
+        { id: 1, name: "First", visible: false, opacity: 1, tree: firstTree, strokeCount: 1 },
+        { id: 2, name: "Second", visible: true, opacity: 1, tree: secondTree, strokeCount: 0 },
+      ],
+      activeLayerId: 2,
+      nextLayerId: 3,
+    };
 
-    const decoded = decodeDrawing(encodeQuadTree(tree, 6));
+    const restored = applyLayerMetadata(document, {
+      version: 1,
+      activeLayerId: 1,
+      layers: [
+        { id: 2, name: "Top", visible: false, opacity: 0.5 },
+        { id: 1, name: "Visible", visible: true, opacity: 0.8 },
+      ],
+    });
 
-    expect(decoded?.version).toBe(2);
-    expect(decoded?.document.layers).toHaveLength(1);
-    expect(decoded?.document.layers[0].strokeCount).toBe(6);
-    expect(decoded?.document.layers[0].tree.snapshot()).toEqual(tree.snapshot());
+    expect(restored.activeLayerId).toBe(1);
+    expect(restored.layers.map(({ id }) => id)).toEqual([2, 1]);
+    expect(restored.layers[1].visible).toBe(true);
+    expect(restored.layers[1].tree).toBe(firstTree);
+    expect(restored.layers[0].tree).toBe(secondTree);
   });
 });

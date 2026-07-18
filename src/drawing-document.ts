@@ -25,18 +25,15 @@ export type DrawingDocument = {
 
 export type LayerInfo = Omit<DrawingLayer, "tree">;
 
-export function createDrawingDocument(
-  tree = new RasterQuadTree(WORLD_BOUNDS),
-  strokeCount = 0,
-): DrawingDocument {
+export function createDrawingDocument(): DrawingDocument {
   return {
     layers: [{
       id: 1,
       name: "Layer 1",
       visible: true,
       opacity: 1,
-      tree,
-      strokeCount,
+      tree: new RasterQuadTree(WORLD_BOUNDS),
+      strokeCount: 0,
     }],
     activeLayerId: 1,
     nextLayerId: 2,
