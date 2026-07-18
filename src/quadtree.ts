@@ -217,7 +217,8 @@ function composite(current: number, paint: number, coverage: number, erase: bool
   const red = Math.round((((paint >>> 24) & 0xff) * coverage + ((current >>> 24) & 0xff) * currentWeight) / outputAlpha);
   const green = Math.round((((paint >>> 16) & 0xff) * coverage + ((current >>> 16) & 0xff) * currentWeight) / outputAlpha);
   const blue = Math.round((((paint >>> 8) & 0xff) * coverage + ((current >>> 8) & 0xff) * currentWeight) / outputAlpha);
-  return packColor(red, green, blue, Math.round(outputAlpha * 255));
+  const alpha = Math.round(outputAlpha * 255);
+  return alpha === 0 ? TRANSPARENT : packColor(red, green, blue, alpha);
 }
 
 function colorFromHex(color: string): number {

@@ -5,7 +5,12 @@ const DATABASE_NAME = "quaddraw";
 const STORE_NAME = "snapshots";
 const SNAPSHOT_KEY = "active-raster-quadtree";
 const MAGIC = 0x51445232; // "QDR2"; deliberately incompatible with path snapshots.
-const VERSION = 1;
+const VERSION = 2;
+const MAX_PALETTE_COLORS = 255;
+const TAG_TRANSPARENT = 0;
+const TAG_BRANCH = 1;
+const TAG_PALETTE = 2;
+const TAG_RAW_COLOR = 3;
 
 type StoredSnapshot = {
   blob: Blob;
@@ -16,6 +21,7 @@ export type RestoredDrawing = {
   tree: RasterQuadTree;
   strokeCount: number;
   snapshotSizes: SnapshotSizes;
+  needsUpgrade: boolean;
 };
 
 export type SnapshotSizes = {
@@ -23,15 +29,16 @@ export type SnapshotSizes = {
   uncompressedBytes: number;
 };
 
+export type DecodedDrawing = {
+  tree: RasterQuadTree;
+  strokeCount: number;
+  version: number;
+};
+
 /** Persists only quadtree topology and raster values—never input paths. */
 export async function saveQuadTree(tree: RasterQuadTree, strokeCount: number): Promise<SnapshotSizes | null> {
   try {
-    const writer = new BinaryWriter();
-    writer.writeUint32(MAGIC);
-    writer.writeUint16(VERSION);
-    writer.writeUint32(strokeCount);
-    writeNode(writer, tree.snapshot());
-    const bytes = writer.toBytes();
+    const bytes = encodeQuadTree(tree, strokeCount);
     const snapshot = await compress(bytes);
     const database = await openDatabase();
     await writeSnapshot(database, snapshot);
@@ -51,17 +58,16 @@ export async function loadQuadTree(): Promise<RestoredDrawing | null> {
     if (!snapshot) return null;
 
     const bytes = await decompress(snapshot);
-    const reader = new BinaryReader(bytes);
-    if (reader.readUint32() !== MAGIC || reader.readUint16() !== VERSION) return null;
-    const strokeCount = reader.readUint32();
-    const root = readNode(reader);
+    const decoded = decodeQuadTree(bytes);
+    if (!decoded) return null;
     return {
-      tree: RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root),
-      strokeCount,
+      tree: decoded.tree,
+      strokeCount: decoded.strokeCount,
       snapshotSizes: {
         compressedBytes: snapshot.blob.size,
         uncompressedBytes: bytes.byteLength,
       },
+      needsUpgrade: decoded.version < VERSION,
     };
   } catch (error) {
     console.warn("Could not restore raster quadtree", error);
@@ -69,22 +75,113 @@ export async function loadQuadTree(): Promise<RestoredDrawing | null> {
   }
 }
 
-function writeNode(writer: BinaryWriter, node: QuadNode): void {
-  if (node.color !== undefined) {
-    writer.writeUint8(0);
-    writer.writeUint32(node.color);
-    return;
-  }
-  writer.writeUint8(1);
-  node.children.forEach((child) => writeNode(writer, child));
+/** Encodes a compact, transfer-ready full snapshot without compression. */
+export function encodeQuadTree(tree: RasterQuadTree, strokeCount: number): Uint8Array {
+  const writer = new BinaryWriter();
+  writer.writeUint32(MAGIC);
+  writer.writeUint16(VERSION);
+  writer.writeUint32(strokeCount);
+
+  const nodes = collectNodes(tree.snapshot());
+  const palette = createPalette(nodes);
+  const paletteIndices = new Map(palette.map((color, index) => [color, index]));
+  writer.writeUint16(palette.length);
+  palette.forEach((color) => writer.writeUint32(color));
+  writer.writeUint32(nodes.length);
+
+  const tags = new Uint8Array(Math.ceil(nodes.length / 4));
+  nodes.forEach((node, index) => {
+    const tag = nodeTag(node, paletteIndices);
+    tags[index >> 2] |= tag << ((index & 3) * 2);
+  });
+  tags.forEach((tagByte) => writer.writeUint8(tagByte));
+
+  nodes.forEach((node) => {
+    if (node.color === undefined || (node.color & 0xff) === 0) return;
+    const paletteIndex = paletteIndices.get(node.color);
+    if (paletteIndex === undefined) writer.writeUint32(node.color);
+    else writer.writeUint8(paletteIndex);
+  });
+  return writer.toBytes();
 }
 
-function readNode(reader: BinaryReader): QuadNode {
+/** Reads both compact version 2 snapshots and the original version 1 layout. */
+export function decodeQuadTree(bytes: Uint8Array): DecodedDrawing | null {
+  const reader = new BinaryReader(bytes);
+  if (reader.readUint32() !== MAGIC) return null;
+  const version = reader.readUint16();
+  if (version < 1 || version > VERSION) return null;
+  const strokeCount = reader.readUint32();
+  const root = version === 1 ? readLegacyNode(reader) : readPackedTree(reader);
+  return { tree: RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root), strokeCount, version };
+}
+
+function collectNodes(root: QuadNode): QuadNode[] {
+  const nodes: QuadNode[] = [];
+  const visit = (node: QuadNode): void => {
+    nodes.push(node);
+    node.children?.forEach(visit);
+  };
+  visit(root);
+  return nodes;
+}
+
+function createPalette(nodes: readonly QuadNode[]): number[] {
+  const frequencies = new Map<number, number>();
+  nodes.forEach((node) => {
+    if (node.color !== undefined && (node.color & 0xff) !== 0) {
+      frequencies.set(node.color, (frequencies.get(node.color) ?? 0) + 1);
+    }
+  });
+  const entries: [number, number][] = [];
+  frequencies.forEach((frequency, color) => entries.push([color, frequency]));
+  return entries
+    .filter(([, frequency]) => frequency > 1)
+    .sort((first, second) => second[1] - first[1])
+    .slice(0, MAX_PALETTE_COLORS)
+    .map(([color]) => color);
+}
+
+function nodeTag(node: QuadNode, paletteIndices: ReadonlyMap<number, number>): number {
+  if (node.color === undefined) return TAG_BRANCH;
+  if ((node.color & 0xff) === 0) return TAG_TRANSPARENT;
+  return paletteIndices.has(node.color) ? TAG_PALETTE : TAG_RAW_COLOR;
+}
+
+function readPackedTree(reader: BinaryReader): QuadNode {
+  const paletteLength = reader.readUint16();
+  const palette = Array.from({ length: paletteLength }, () => reader.readUint32());
+  const nodeCount = reader.readUint32();
+  if (nodeCount === 0) throw new Error("Raster quadtree snapshot has no root node");
+  const tags = Array.from({ length: Math.ceil(nodeCount / 4) }, () => reader.readUint8());
+  let nodeIndex = 0;
+
+  const readNode = (): QuadNode => {
+    if (nodeIndex >= nodeCount) throw new Error("Raster quadtree topology exceeds its node count");
+    const tag = (tags[nodeIndex >> 2] >> ((nodeIndex & 3) * 2)) & 0b11;
+    nodeIndex += 1;
+    if (tag === TAG_TRANSPARENT) return { color: 0 };
+    if (tag === TAG_PALETTE) {
+      const paletteIndex = reader.readUint8();
+      const color = palette[paletteIndex];
+      if (color === undefined) throw new Error("Invalid raster quadtree palette index");
+      return { color };
+    }
+    if (tag === TAG_RAW_COLOR) return { color: reader.readUint32() };
+    return { children: [readNode(), readNode(), readNode(), readNode()] };
+  };
+
+  const root = readNode();
+  if (nodeIndex !== nodeCount) throw new Error("Raster quadtree topology did not consume every node");
+  return root;
+}
+
+function readLegacyNode(reader: BinaryReader): QuadNode {
   const kind = reader.readUint8();
   if (kind === 0) return { color: reader.readUint32() };
-  if (kind !== 1) throw new Error("Invalid raster quadtree node");
+  if (kind !== 1) throw new Error("Invalid legacy raster quadtree node");
   return {
-    children: [readNode(reader), readNode(reader), readNode(reader), readNode(reader)],
+    children: [readLegacyNode(reader), readLegacyNode(reader), readLegacyNode(reader), readLegacyNode(reader)],
   };
 }
 

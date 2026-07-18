@@ -11,8 +11,10 @@ and fills the visible colored nodes directly.
 
 Undo and redo retain copy-on-write tree roots, so unchanged branches are shared.
 IndexedDB persistence stores the raster values and full tree topology in the
-`QDR2` binary snapshot format. Pointer samples are transient and are neither
-rendered as paths nor persisted.
+`QDR2` binary snapshot format. Its compact layout packs four node tags per byte,
+omits payloads for transparent leaves, and uses a frequency-selected color
+palette. Pointer samples are transient and are neither rendered as paths nor
+persisted.
 
 Use the `Q` shortcut or the quadtree toolbar button to overlay the live leaf
 topology. Outline hue represents depth, and occupied leaves are emphasized over

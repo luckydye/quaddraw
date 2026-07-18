@@ -37,6 +37,7 @@ export class DrawingStore {
     this.tree = restored.tree;
     this.committedStrokeCount = restored.strokeCount;
     this.setSnapshotSizes(restored.snapshotSizes);
+    if (restored.needsUpgrade) this.persist();
   }
 
   createStroke(point: Point, color: string, width: number): BrushAction {
