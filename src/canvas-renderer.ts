@@ -797,10 +797,13 @@ export class CanvasRenderer {
     this.panTiles.clear();
   }
 
-  private drawPanTilesForCamera(camera: Camera): void {
+  private drawPanTilesForCamera(
+    camera: Camera,
+    include: (tile: PanTile) => boolean,
+  ): void {
     const viewport = this.viewportBounds(camera);
     const visibleTiles = [...this.panTiles.entries()]
-      .filter(([, tile]) => rectanglesIntersect(tile.bounds, viewport))
+      .filter(([, tile]) => include(tile) && rectanglesIntersect(tile.bounds, viewport))
       // Coarser tiles establish coverage first; sharper cached tiles replace
       // them wherever their smaller world-space bounds overlap.
       .sort(([, left], [, right]) => left.zoom - right.zoom);
@@ -831,8 +834,12 @@ export class CanvasRenderer {
   }
 
   private drawTreeForCamera(viewport: DOMRect, camera: Camera): void {
+    const committedMatchesCamera = sameTileZoom(camera.zoom, this.committedCamera.zoom);
     this.drawOverviewForCamera(camera);
-    this.drawPanTilesForCamera(camera);
+    this.drawPanTilesForCamera(
+      camera,
+      (tile) => committedMatchesCamera || tile.zoom <= this.committedCamera.zoom,
+    );
 
     // The overview is only a fallback for world space outside the detailed
     // cache. Remove it beneath the cache before compositing; otherwise its
@@ -885,6 +892,9 @@ export class CanvasRenderer {
         sourceWidth * zoomRatio,
         sourceHeight * zoomRatio,
       );
+    }
+    if (!committedMatchesCamera) {
+      this.drawPanTilesForCamera(camera, (tile) => tile.zoom > this.committedCamera.zoom);
     }
   }
 
