@@ -152,6 +152,7 @@ export class CanvasRenderer {
     renderedWorldBounds: Bounds | null,
     selection: RasterSelection | null = null,
     marquee: Bounds | null = null,
+    lasso: readonly Point[] | null = null,
     selectionOffset: Point = { x: 0, y: 0 },
   ): void {
     const viewport = this.area.getBoundingClientRect();
@@ -181,7 +182,7 @@ export class CanvasRenderer {
     this.drawTreeForCamera(viewport, camera);
     this.context.clearRect(0, 0, viewport.width, viewport.height);
     this.context.drawImage(this.treeCanvas, 0, 0, viewport.width, viewport.height);
-    this.drawSelection(viewport, camera, selection, marquee, selectionOffset);
+    this.drawSelection(viewport, camera, selection, marquee, lasso, selectionOffset);
   }
 
   /** Re-rasterizes a localized world-space edit into the existing camera cache. */
@@ -266,6 +267,7 @@ export class CanvasRenderer {
       this.committedWorldBounds,
       selection,
       marquee,
+      null,
       selectionOffset,
     );
     return true;
@@ -590,9 +592,10 @@ export class CanvasRenderer {
     camera: Camera,
     selection: RasterSelection | null,
     marquee: Bounds | null,
+    lasso: readonly Point[] | null,
     selectionOffset: Point,
   ): void {
-    if (!selection && !marquee) return;
+    if (!selection && !marquee && !lasso?.length) return;
     const isMoving = selection !== null
       && (selectionOffset.x !== 0 || selectionOffset.y !== 0);
     const selectionPath = selection && (
@@ -651,6 +654,23 @@ export class CanvasRenderer {
       this.context.lineWidth = 1 / camera.zoom;
       this.context.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
       this.context.strokeRect(marquee.x, marquee.y, marquee.width, marquee.height);
+    }
+
+    if (lasso?.length) {
+      this.context.beginPath();
+      this.context.moveTo(lasso[0].x, lasso[0].y);
+      for (let index = 1; index < lasso.length; index++) {
+        this.context.lineTo(lasso[index].x, lasso[index].y);
+      }
+      if (lasso.length >= 3) {
+        this.context.closePath();
+        this.context.fillStyle = "rgb(91 93 209 / 0.08)";
+        this.context.fill();
+      }
+      this.context.strokeStyle = "rgb(75 77 196 / 0.95)";
+      this.context.lineWidth = 1 / camera.zoom;
+      this.context.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+      this.context.stroke();
     }
 
     this.context.restore();

@@ -22,7 +22,7 @@ export type Camera = {
   zoom: number;
 };
 
-export type Tool = "select" | "pen" | "eraser" | "hand";
+export type Tool = "select" | "lasso" | "pen" | "eraser" | "hand";
 export type BrushTexture = "solid" | "bristle" | "charcoal";
 
 /** Ephemeral pointer input. It is never rendered or persisted as a path. */

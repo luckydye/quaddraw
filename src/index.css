@@ -112,7 +112,11 @@ button {
 .canvas-area[data-tool="select"] {
     cursor: default;
 }
-.canvas-area[data-tool="select"].is-moving-selection {
+.canvas-area[data-tool="lasso"] {
+    cursor: crosshair;
+}
+.canvas-area[data-tool="select"].is-moving-selection,
+.canvas-area[data-tool="lasso"].is-moving-selection {
     cursor: move;
 }
 .canvas-area[data-tool="hand"] {

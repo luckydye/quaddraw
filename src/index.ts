@@ -94,6 +94,7 @@ let renderedWorldBounds: Bounds | null = null;
 let selection: RasterSelection | null = null;
 let selectionStart: Point | null = null;
 let selectionMarquee: Bounds | null = null;
+let selectionLasso: Point[] | null = null;
 let selectionMoveStart: Point | null = null;
 let selectionOffset: Point = { x: 0, y: 0 };
 let debugQuadtree = false;
@@ -215,6 +216,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
           renderedWorldBounds,
           selection,
           selectionMarquee,
+          selectionLasso,
           selectionOffset,
         );
         if (currentAction && store.activeActionBounds) {
@@ -230,6 +232,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
     renderedWorldBounds,
     selection,
     selectionMarquee,
+    selectionLasso,
     selectionOffset,
   );
   if (redrawMinimap) {
@@ -422,6 +425,23 @@ function finishInteraction(completeSelection = true): void {
     selectionMarquee = null;
   }
 
+  if (selectionLasso) {
+    if (completeSelection) {
+      const previousLayerId = store.activeLayerId;
+      selection = selectionLasso.length >= 3
+        ? store.selectConnectedIslandsInPolygon(selectionLasso)
+        : store.selectConnectedIslands(selectionHitArea(boundsFromPoints(
+          selectionLasso[0],
+          selectionLasso[0],
+        )));
+      if (store.activeLayerId !== previousLayerId) renderLayerPanel();
+      if (selection) {
+        showToast(`${selection.islandCount} ink island${selection.islandCount === 1 ? "" : "s"} selected`);
+      }
+    }
+    selectionLasso = null;
+  }
+
   isPanning = false;
   lastPointerPosition = null;
   elements.area.classList.remove("is-panning");
@@ -442,6 +462,7 @@ function cancelToolInteraction(): void {
   selectionMoveStart = null;
   selectionStart = null;
   selectionMarquee = null;
+  selectionLasso = null;
   selectionOffset = { x: 0, y: 0 };
   isPanning = false;
   lastPointerPosition = null;
@@ -659,7 +680,7 @@ function bindCanvasEvents(): void {
     const point = renderer.screenToWorld(event, camera);
     lastPointerPosition = { x: event.clientX, y: event.clientY };
 
-    if (activeTool === "select" && !isSpacePressed) {
+    if ((activeTool === "select" || activeTool === "lasso") && !isSpacePressed) {
       if (selection && pointInBounds(point, selection.bounds)) {
         selectionMoveStart = point;
         selectionOffset = { x: 0, y: 0 };
@@ -667,8 +688,11 @@ function bindCanvasEvents(): void {
         return;
       }
       selection = null;
-      selectionStart = point;
-      selectionMarquee = boundsFromPoints(point, point);
+      if (activeTool === "lasso") selectionLasso = [point];
+      else {
+        selectionStart = point;
+        selectionMarquee = boundsFromPoints(point, point);
+      }
       render(false, false);
       return;
     }
@@ -715,6 +739,16 @@ function bindCanvasEvents(): void {
     if (selectionStart) {
       selectionMarquee = boundsFromPoints(selectionStart, renderer.screenToWorld(event, camera));
       render(false, false);
+      return;
+    }
+
+    if (selectionLasso) {
+      const point = renderer.screenToWorld(event, camera);
+      const previous = selectionLasso[selectionLasso.length - 1];
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) >= 2 / camera.zoom) {
+        selectionLasso.push(point);
+        render(false, false);
+      }
       return;
     }
 
@@ -908,10 +942,15 @@ function bindKeyboardShortcuts(): void {
     if (event.key.toLowerCase() === "e") selectTool("eraser");
     if (event.key.toLowerCase() === "h") selectTool("hand");
     if (event.key.toLowerCase() === "v" && !event.metaKey && !event.ctrlKey) selectTool("select");
-    if (event.key === "Escape" && (selection || selectionMarquee || selectionMoveStart)) {
+    if (event.key.toLowerCase() === "l" && !event.metaKey && !event.ctrlKey) selectTool("lasso");
+    if (
+      event.key === "Escape"
+      && (selection || selectionMarquee || selectionLasso || selectionMoveStart)
+    ) {
       selection = null;
       selectionStart = null;
       selectionMarquee = null;
+      selectionLasso = null;
       selectionMoveStart = null;
       selectionOffset = { x: 0, y: 0 };
       elements.area.classList.remove("is-moving-selection");

@@ -251,6 +251,18 @@ export class DrawingStore {
   }
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
+    return this.selectConnectedIslandsFromLayer((tree) => tree.connectedIslandsTouching(area));
+  }
+
+  selectConnectedIslandsInPolygon(points: readonly Point[]): RasterSelection | null {
+    return this.selectConnectedIslandsFromLayer(
+      (tree) => tree.connectedIslandsTouchingPolygon(points),
+    );
+  }
+
+  private selectConnectedIslandsFromLayer(
+    select: (tree: RasterQuadTree) => RasterSelection | null,
+  ): RasterSelection | null {
     const activeIndex = this.document.layers.findIndex(
       ({ id }) => id === this.document.activeLayerId,
     );
@@ -261,7 +273,7 @@ export class DrawingStore {
     }
     for (const index of layerIndexes) {
       const layer = this.document.layers[index];
-      const selection = layer.tree.connectedIslandsTouching(area);
+      const selection = select(layer.tree);
       if (!selection) continue;
       if (layer.id !== this.document.activeLayerId) this.setActiveLayer(layer.id);
       return selection;

@@ -41,6 +41,8 @@ const occupiedBoundsCache = new WeakMap<QuadNode, Bounds | null>();
  * directly instead of replaying vector paths.
  */
 export class RasterQuadTree {
+  private selectionIndexCache: ConnectedCellIndex | null = null;
+
   constructor(
     public readonly bounds: Bounds,
     private readonly root: QuadNode = uniform(TRANSPARENT),
@@ -161,47 +163,39 @@ export class RasterQuadTree {
   /** Selects complete islands seeded by any of the supplied occupied areas. */
   connectedIslandsTouchingAreas(areas: readonly Bounds[]): RasterSelection | null {
     if (areas.length === 0) return null;
-    const seeds = new Map<number, IndexedRasterCell>();
-    const addSeed: IndexedCellVisitor = (x, y, width, height, color, address) => {
-      if (!seeds.has(address)) {
-        seeds.set(address, { bounds: { x, y, width, height }, color, address });
-      }
+    const index = this.selectionIndexCache ??= buildConnectedCellIndex(
+      this.root,
+      this.bounds,
+    );
+    const selectedComponents = new Set<number>();
+    const addSeed: IndexedCellVisitor = (_x, _y, _width, _height, _color, address) => {
+      const cellIndex = index.addresses.get(address);
+      if (cellIndex !== undefined) selectedComponents.add(index.components[cellIndex]);
     };
     for (const area of areas) {
       this.visitIndexedCells(area, addSeed);
     }
-    if (seeds.size === 0) return null;
+    return selectionFromComponents(index, selectedComponents);
+  }
 
-    const selected = new Map<number, IndexedRasterCell>();
-    const neighborOutset = Math.min(this.bounds.width, this.bounds.height)
-      / 2 ** MAX_DEPTH / 4;
-    let islandCount = 0;
-    let pending: IndexedRasterCell[] = [];
-    const addNeighbor: IndexedCellVisitor = (x, y, width, height, color, address) => {
-      if (selected.has(address)) return;
-      const neighbor = { bounds: { x, y, width, height }, color, address };
-      selected.set(address, neighbor);
-      pending.push(neighbor);
-    };
-
-    for (const seed of seeds.values()) {
-      if (selected.has(seed.address)) continue;
-      islandCount += 1;
-      selected.set(seed.address, seed);
-      pending = [seed];
-
-      for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex++) {
-        const cell = pending[pendingIndex];
-        this.visitIndexedCells(expandBounds(cell.bounds, neighborOutset), addNeighbor);
-      }
-    }
-
-    const selectedCells = [...selected.values()];
-    return {
-      cells: selectedCells,
-      bounds: enclosingBounds(selectedCells),
-      islandCount,
-    };
+  /** Selects complete islands touched or enclosed by a freehand polygon. */
+  connectedIslandsTouchingPolygon(points: readonly Point[]): RasterSelection | null {
+    if (points.length < 3) return null;
+    const index = this.selectionIndexCache ??= buildConnectedCellIndex(
+      this.root,
+      this.bounds,
+    );
+    const selectedComponents = new Set<number>();
+    const polygonBounds = enclosingPointBounds(points);
+    this.visitIndexedCells(
+      polygonBounds,
+      (x, y, width, height, _color, address) => {
+        if (!rectangleIntersectsPolygon({ x, y, width, height }, points)) return;
+        const cellIndex = index.addresses.get(address);
+        if (cellIndex !== undefined) selectedComponents.add(index.components[cellIndex]);
+      },
+    );
+    return selectionFromComponents(index, selectedComponents);
   }
 
   private visitIndexedCells(area: Bounds, visitor: IndexedCellVisitor): void {
@@ -804,6 +798,182 @@ type IndexedCellVisitor = (
   address: number,
 ) => void;
 
+type ConnectedCellIndex = {
+  cells: IndexedRasterCell[];
+  addresses: Map<number, number>;
+  components: Int32Array;
+};
+
+type BoundaryInterval = {
+  start: number;
+  end: number;
+  cellIndex: number;
+};
+
+function selectionFromComponents(
+  index: ConnectedCellIndex,
+  selectedComponents: ReadonlySet<number>,
+): RasterSelection | null {
+  if (selectedComponents.size === 0) return null;
+  const selectedCells = index.cells.filter(
+    (_cell, cellIndex) => selectedComponents.has(index.components[cellIndex]),
+  );
+  return {
+    cells: selectedCells,
+    bounds: enclosingBounds(selectedCells),
+    islandCount: selectedComponents.size,
+  };
+}
+
+/**
+ * Builds connected components once for an immutable tree. The previous flood
+ * fill issued a fresh root-to-leaf spatial query for every selected cell,
+ * making a large island roughly O(cells * tree depth). Sorting the leaf edges
+ * makes the one-time index O(cells log cells), after which selection is linear.
+ */
+function buildConnectedCellIndex(root: QuadNode, bounds: Bounds): ConnectedCellIndex {
+  const cells: IndexedRasterCell[] = [];
+  collectIndexedCells(
+    root,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    bounds,
+    1,
+    (x, y, width, height, color, address) => {
+      cells.push({ bounds: { x, y, width, height }, color, address });
+    },
+  );
+
+  const addresses = new Map<number, number>();
+  const leftEdges = new Map<number, BoundaryInterval[]>();
+  const rightEdges = new Map<number, BoundaryInterval[]>();
+  const topEdges = new Map<number, BoundaryInterval[]>();
+  const bottomEdges = new Map<number, BoundaryInterval[]>();
+  const cornerOwners = new Map<number, Map<number, number>>();
+  const components = new DisjointCellSet(cells.length);
+  for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
+    const cell = cells[cellIndex];
+    const { x, y, width, height } = cell.bounds;
+    addresses.set(cell.address, cellIndex);
+    addBoundaryInterval(leftEdges, x, y, y + height, cellIndex);
+    addBoundaryInterval(rightEdges, x + width, y, y + height, cellIndex);
+    addBoundaryInterval(topEdges, y, x, x + width, cellIndex);
+    addBoundaryInterval(bottomEdges, y + height, x, x + width, cellIndex);
+    connectCorner(cornerOwners, components, x, y, cellIndex);
+    connectCorner(cornerOwners, components, x + width, y, cellIndex);
+    connectCorner(cornerOwners, components, x, y + height, cellIndex);
+    connectCorner(cornerOwners, components, x + width, y + height, cellIndex);
+  }
+
+  connectOpposingEdges(rightEdges, leftEdges, components);
+  connectOpposingEdges(bottomEdges, topEdges, components);
+  const componentByCell = new Int32Array(cells.length);
+  for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
+    componentByCell[cellIndex] = components.find(cellIndex);
+  }
+  return { cells, addresses, components: componentByCell };
+}
+
+function connectCorner(
+  ownersByX: Map<number, Map<number, number>>,
+  components: DisjointCellSet,
+  x: number,
+  y: number,
+  cellIndex: number,
+): void {
+  let ownersByY = ownersByX.get(x);
+  if (!ownersByY) {
+    ownersByY = new Map();
+    ownersByX.set(x, ownersByY);
+  }
+  const owner = ownersByY.get(y);
+  if (owner === undefined) ownersByY.set(y, cellIndex);
+  else components.union(owner, cellIndex);
+}
+
+function addBoundaryInterval(
+  edges: Map<number, BoundaryInterval[]>,
+  coordinate: number,
+  start: number,
+  end: number,
+  cellIndex: number,
+): void {
+  const intervals = edges.get(coordinate);
+  const interval = { start, end, cellIndex };
+  if (intervals) intervals.push(interval);
+  else edges.set(coordinate, [interval]);
+}
+
+function connectOpposingEdges(
+  endingEdges: ReadonlyMap<number, BoundaryInterval[]>,
+  startingEdges: ReadonlyMap<number, BoundaryInterval[]>,
+  components: DisjointCellSet,
+): void {
+  for (const [coordinate, endings] of endingEdges) {
+    const starts = startingEdges.get(coordinate);
+    if (!starts) continue;
+    endings.sort(compareBoundaryIntervals);
+    starts.sort(compareBoundaryIntervals);
+    let endingIndex = 0;
+    let startingIndex = 0;
+    while (endingIndex < endings.length && startingIndex < starts.length) {
+      const ending = endings[endingIndex];
+      const starting = starts[startingIndex];
+      // Corners are indexed separately; an edge requires positive overlap.
+      if (ending.end <= starting.start) {
+        endingIndex += 1;
+        continue;
+      }
+      if (starting.end <= ending.start) {
+        startingIndex += 1;
+        continue;
+      }
+      components.union(ending.cellIndex, starting.cellIndex);
+      if (ending.end <= starting.end) endingIndex += 1;
+      if (starting.end <= ending.end) startingIndex += 1;
+    }
+  }
+}
+
+function compareBoundaryIntervals(first: BoundaryInterval, second: BoundaryInterval): number {
+  return first.start - second.start || first.end - second.end;
+}
+
+class DisjointCellSet {
+  private readonly parents: Int32Array;
+  private readonly ranks: Uint8Array;
+
+  constructor(size: number) {
+    this.parents = new Int32Array(size);
+    this.ranks = new Uint8Array(size);
+    for (let index = 0; index < size; index++) this.parents[index] = index;
+  }
+
+  find(index: number): number {
+    let root = index;
+    while (this.parents[root] !== root) root = this.parents[root];
+    while (this.parents[index] !== index) {
+      const parent = this.parents[index];
+      this.parents[index] = root;
+      index = parent;
+    }
+    return root;
+  }
+
+  union(first: number, second: number): void {
+    let firstRoot = this.find(first);
+    let secondRoot = this.find(second);
+    if (firstRoot === secondRoot) return;
+    if (this.ranks[firstRoot] < this.ranks[secondRoot]) {
+      [firstRoot, secondRoot] = [secondRoot, firstRoot];
+    }
+    this.parents[secondRoot] = firstRoot;
+    if (this.ranks[firstRoot] === this.ranks[secondRoot]) this.ranks[firstRoot] += 1;
+  }
+}
+
 function collectIndexedCells(
   node: QuadNode,
   x: number,
@@ -1136,6 +1306,47 @@ function rectanglesIntersect(first: Bounds, second: Bounds): boolean {
     && first.x + first.width > second.x
     && first.y < second.y + second.height
     && first.y + first.height > second.y;
+}
+
+function enclosingPointBounds(points: readonly Point[]): Bounds {
+  const left = Math.min(...points.map(({ x }) => x));
+  const top = Math.min(...points.map(({ y }) => y));
+  const right = Math.max(...points.map(({ x }) => x));
+  const bottom = Math.max(...points.map(({ y }) => y));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function rectangleIntersectsPolygon(rectangle: Bounds, polygon: readonly Point[]): boolean {
+  if (polygon.some((point) => pointInRect(point, rectangle))) return true;
+  const corners = rectangleCorners(rectangle);
+  if (corners.some((corner) => pointInPolygon(corner, polygon))) return true;
+  const rectangleEdges: readonly [Point, Point][] = [
+    [corners[0], corners[1]],
+    [corners[1], corners[3]],
+    [corners[3], corners[2]],
+    [corners[2], corners[0]],
+  ];
+  for (let index = 0; index < polygon.length; index++) {
+    const start = polygon[index];
+    const end = polygon[(index + 1) % polygon.length];
+    if (rectangleEdges.some(([edgeStart, edgeEnd]) => (
+      segmentsIntersect(start, end, edgeStart, edgeEnd)
+    ))) return true;
+  }
+  return false;
+}
+
+function pointInPolygon(point: Point, polygon: readonly Point[]): boolean {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+    const start = polygon[index];
+    const end = polygon[previous];
+    if (
+      (start.y > point.y) !== (end.y > point.y)
+      && point.x < (end.x - start.x) * (point.y - start.y) / (end.y - start.y) + start.x
+    ) inside = !inside;
+  }
+  return inside;
 }
 
 function expandBounds(bounds: Bounds, amount: number): Bounds {
