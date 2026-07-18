@@ -2,18 +2,11 @@ import type { BrushTexture } from "./types";
 
 const BRISTLE_MASK_WIDTH = 64;
 const BRISTLE_MASK_HEIGHT = 32;
-// The source is a photographed swatch with transparent scanner margins above
-// and below the actual pigment. The rasterizer already supplies the circular
-// brush silhouette, so sampling those margins would flatten both sides of a
-// dot (and expose hard wedges wherever curve pieces meet).
-const BRISTLE_PAINT_TOP = 0.22;
-const BRISTLE_PAINT_BOTTOM = 0.76;
-const BRISTLE_GRAIN_CONTRAST = 3.2;
 
 // 8-bit alpha lookup generated from assets/bristle-mask.png. Keeping the small
 // sampling copy inline makes brush rasterization synchronous and deterministic;
 // the PNG remains the editable source and is also used by the preset preview.
-const BRISTLE_MASK_BASE64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQICAQIBAQECAQEBAQEBAQEBAQEBAQECAQEBAQEBAQEBAQEBAQEBAgICAgEBAQEBAQEBAQACAQABAAEEAgABAQEAAAAAAAEAAAABAQIBAQEBAgICAwIAAAAAAQICAQIBAQIBAQEBAQAAAAUDAgICAQACAgUIAAEGAAoAAA0ECgYHFRQZFgsECQ4LAQEAAAcCBAgQEwsADhgSDAIAAAQBAQAAAAEBAwUhIBYaIAQGAAsFBgcACg4IFAQULCJAQkJFRD1JNh4OCwkPAQAGJSgYHBAUKjgWEBQrMgEACiEOBxwNBhAZBBAJGDguNxwYOxIpOkhJN1xpeFM8dodLdI2BblAxGzFNT0hEOUY2PUpJg56ShnaBnI9rNyhdXldtOzFcVlhSJA6cb3Kvsp+NgaGMm6rF19zn7N6loZZyWqDOybaaeJCb2cu1nm9jbY16v+TJw+DGu8ysUxF50sDfwHVnXKm2nXyF2sifpq+fXUegocbS0M7Q0dzdydjM0uLp9/vcv9bLw+XEw7mnya6xy9HR5univ8DHqYNoYafG3LKFhIiRm52LdubK1tDDvJW228TH4uXs6uPr9PXs6Ojw9Pf1+Pv99P7s8PHp4uDj5+/s5enw9fP7+v/z6dvr9fDm19HHxM+5pKjT7/H7/v/37vvmyM/m59D56uHr9evr9/jx+fTy+Ofw+Oz49ens9PLv9fb19vX28vDl6O7y8ezv8+zu4ujk6vHk3O317dff6uDo8t/d6ebT+evh8Pn19vz7+vz5+/z6+/r++/n6+fX4+fj5+ff39vX28u7z9fLy9ff79/X2/Pz67/75+fr6+fr69vr///v9/fn5+Pf7+vn6+fn7/P37+/n6+/j49vP09/f4+fn5+fr3+Pj7+Pr59/T29vj49/n69/f4+vj5+fr7/Pv6+fr8+vr6+/v6+vz7+vv7+vr7+/v8/Pz8+/n7+/r7/Pr6+vv8/Pv7+fv8/Pr8/Pj8/Pz8/fz8+vr6/Pz7+vr6+vz8/Pz7/Pz6/Pz8/f39/P39/P3+/f39/fz7+vv8/Pr5+/v8/fr7/Pv5+fz9/Pv7/vz9/f39/ff6+fb3+fv5+Pj0+Pv6+fr5+fr6+fv8/fr5+/v8+/v7+vr7+vj7+/n5+fv6+/r6+fn6+fv8/Pz7+/v8/fz7+vr2+Pr4+Pb4+fn5+fj6+fn3+fr8/Pv7+/z8/P39/P39/P39/Pz9/f3+/vz8/Pz7+/r6+/v8/Pz8+/z8/Pz8/Pv69Pb6+fj4+Pj6+vv6+vj5+vr6+vr6+vr7+vv7+fv6/Pz7/Pv6+vz7+/v7+vn6+fn5+vr5+fr7+vv6+vr7/Pv6+vj29/n6+Pj5+fn5+Pn7+vj4+fj6+fr6+vn5+/r6+/v7/Pz6+vv7+/v7+/v6+vn7+/v6+vv8/Pz8+/v8+/v8/Pz49/f29/r6+vn49/n6+vr6+/r4+fr6+fr7+fr8/Pv7/Pv7+/v7+vr6+vv6+/v59/j5+vv6+Pn6+vn5+/v8+/n5+fr5+vn6+vr7/Pv5+/v6+/r6+/z6+vz6+fv7+/z8/Pv8/Pv7+/z7+vr6+vv6+vn6+Pn59/j59vf49/v59/r5+/v7+vf5+Pn5+fj2+fj4+Pf2+Pn3+Pn5+Pr5+vr6+vr5+vv6+vv6+/z6+fv5+Pn3+fn6+fj3+fn4+fr6+vj7+vn3+ff3+fb48fj18/P09/T0+ff18vj49/P29Pj8//n5+/n5+vn09vPz9fb4+fr69vT09PP29PX08/Pz9/b38vb4+fb47/D38+7x8Ovn5uPFw9v108/h0OXl0+X78OTy7Ofk9u7o9ens6+/w7/Do5Ovv5Obu6fLy7vLt8vTw9ffz9vP7/fb09vPs9fny9PPy7O3y9ujm4cjb48bP4+/k4d/X2vLayOHL2+zi4u7o5+TdwdXm7e7X2+LVy9je4ene17/FvMXAtrK/tsrQl468mbLe1tvg0MDnv4as0Ni30cyvvrS259PCy3yTtbPDxOTx9N/c3uDe3N/x3dDb4dPnz9DTqLmiVFJ9mHBxiT9GnmVVyLuqwJeo6sydiXy9pp10dKpyaJBQKFI/M1RVTGqPmJy4tqduhqGr3c2dz9a5lIy/yURkbkA9isVfKIuTQHGYaJB3VT0/cKK/qI1jf6SKSE5aYklDSjAhNzRJZFMoJCkaJFs6LlZkZ3ShoLbGx8Ld3rs/RU5ILDdKJCAtRy82RikbJiEPBBUpST1BFhVOQxgfIxweK0IbCAsCEDdNLhIFDQANEgsKKx0kSlFcZz5DPDtJBAIBAAkCAQAFAAAAAwQBAAQDBAIAAAAAAAIHAgwFAw8JAQsAAAMAAQAACgYBBAADCggBBwAAAgIAAAAAAAAAAAECAQIAAQECAAIDAQAAAQIBAQABAQMEAwICAQEAAAEAAAEAAgEBAQEBAgAAAQEBAQAAAQABAgEBAgQDAwMDAwQBAQEBAgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAgEBAgIBAQEBAQEBAQECAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+const BRISTLE_MASK_BASE64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEEAgEBAQEFAgUCBwsHDA8bGgkCDQEBBQMKGg0MHQoBBQEDAQIBAQEBAQEBAQEBAQEBAQEBAQEBAgEBAQ0CBgorHx0JBQIMBhMKByMvQkZAOi0YGAoCICMZGTYiFysQDCEQEwsWBwEBAQECAQEBAQEBAQEBAQEBDyEWBwYLBQsSLzgpMhI2QDpmcFiKX35oNx44QTw+Q0xxrY9lj3cvXU5VQGNYMyIbCw8cKSAMAgEBAQEBAQEBAgURI0lJZVuabJSMgZKRttrh5LaSaXnSzJOjys2bZnWD1LXHz8dvQrzSoFt9s4p8a2dEDR0hDQUBAQEBAwYECwcOJkyRv2Ghzb6rsV+GrMzRztfQ0M/g8uLCv9rAu8qyxMvr4b3EiFGY0KZ4f4ZvTWNxQUE1TBciFQkCAQISESo2SlhohYJ51O7V186o0s3h5uXy+fHr+Pb3+fHu793S1eTh5fTv8e3p8Pbp4tvaubLFwK2zl7dym2kuCQICBxcmPkWVnsqvveHh5fP16e3RzOnb5+Dy6vby9fbs9u/38Pb09fb09e/o7/Dp6+fd5e/d19G3kX9SO21eSD4dBA0qVcDJ79jH3OTd1Ozv3Ojn7ujt5vPy+vr7/Pv9/Pz7+vj2+vr5+Pf39Pb19fj28/n57+ri0sqxoJWVXjwmCwtEfpPAyejl7/r8+/r7+vn5+Pr7+vn49fv3+vn7/Pr4+vj19vj4+fr59/n4+PX2+Pb69/fz7erlz69ZJRkKCwYhfmB6r8fu7vf4+vv5+fn5/Pv5+/v7+/r7/Pv7+vv7/Pv6+vr6+/r6+/v5+/v6+fz8/fz8+/jt2s28qZ16MxQEERsleLbf8PX6+/n6+vr7/Pn6/Pz8+/v8/f39/f39/v39/Pr7/Pr7/fv7+/n8/fz9/f39/fv7+vf18+XOn3JTOxJVfKHb+fP39/P49/X6+Pf6+Pf5+vn4+fn6/Pr6/Pv7+/v6+/n5+/v6+fr6/Pz7+/z7+vr4+fj3+O7q6MZ1LyAJFjZds63i9/Hy+Pb2+fj39/n5+fr4+fv8+/z8/P39/P38/P39/Pz7+/n6+/z8/Pz8/Pv48/Lv36y2ysO4iDstERxIf7rT5O339/j59/b5+Pn5+vr5+fr6+vr6+/v6+/z7+/r7+/v6+/n5+vr6+/v6+/z6+vj09Ovp3MOkYCodGgophsjk9vj4+Pj5+vj2+fn4+fr4+vr4+fr6+vn7+vv7/Pv7+/v7+/r5+/v6/Pz7+/v7/Pv6+vr559Lrwnc2DAJGbXiFt+73+Pn5+fr5+Pb4+vr4+vr6+vn5+vr6+vz7/Pv7+vr6+/v7+Pf6+vn5+vn7/Pr5+/r5+fj489esbkVHFEFnj6/l5vDy9/j5+fn6+vr7+/j7+vr7+/r7+vv7/Pz8+/v8+vr6+vn5+Pn49/f4+ff5+uzO6eHe0czMv6t5Pxc3PGujyvH19vn5+fr7+fn5+fb4+Pf2+Pf6+fn6+/v5+/v7+vv5+vr5+fv5+Pr4+fr6+vr6+vn38+SwinZAKBECBRxQl9Dn8vn39/L4+Pf39fX09Pbz9/b29fT09/v4+Pf49PPz9vn49/T09PT19PP39/f3+PDr2a6giUcmGgYBBg8cYaLIxdPc8ff5+fjz9/fx8OrhyNvh1t3k2vXs8Ovr8vTp8PDx6OLo4eru8PDy8PT19vLs7eXZiE9VIw0TCQECAwxCoK3I6+Di5ufy8Ovs7vHr8+nw8ubO28fa6d/e5trWzt7e5+rqyOrq3eHU4ufh1sDS1dHNmYqKk3o1JRAXFipCWIi3or/O08jJxca6v8vGkau82NjA06W23cHVwMHjy7SMo7PY6+fb6d7n4M7U5s26oJ2BmoNuXWNVGwYBBwQCCB5CRTc8goCRpbVtY45kZ1aDf8G/o+S+gZynbpdjgC5LQWVjg5KqnW6dyr3XzZW2z8isbDwxNzEkGRAEAQEBAREMCgcPJCcXCCZUQ1i4P5ZSkHVrO0mNnXt6jElLUUE7KjhaSi0rMlFAbHmap7vK3ZmdREE+QVFWWSYPBAEBAQEBBwIDAxMNFRg1WE4zNCMtMD8oLRwOKko8HlYpKiYvKgsFHkYaDwUTChkcRFBGNTBCRTYcEAkHAgEBAQEBAQEBAQEBAQMDCQoJBAMCCAgDAwMCAgQDAQEBBgQFAgQEBAICAQIJAgEBBgQEAQIBAgICAQIBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQIBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
 
 const bristleMask = decodeBase64(BRISTLE_MASK_BASE64);
 
@@ -29,9 +22,44 @@ export function sampleBrushTexture(
 
   const phase = hashUnit(seed ^ 0x68bc21eb);
   const repeat = mirroredRepeat(along + phase);
-  const tipAcross = (seed & 1) === 0 ? across : 1 - across;
-  const vertical = interpolate(BRISTLE_PAINT_TOP, BRISTLE_PAINT_BOTTOM, tipAcross);
-  const x = repeat * (BRISTLE_MASK_WIDTH - 1);
+  const vertical = (seed & 1) === 0 ? across : 1 - across;
+  return sampleBristleMask(repeat, vertical);
+}
+
+/** Samples one complete 2D tip stamp without repeating or circular clipping. */
+export function sampleBrushTip(
+  texture: BrushTexture,
+  along: number,
+  across: number,
+  seed: number,
+): number {
+  if (texture !== "bristle") return 1;
+  if (along < 0 || along > 1 || across < 0 || across > 1) return 0;
+  const horizontal = (seed & 2) === 0 ? along : 1 - along;
+  const vertical = (seed & 1) === 0 ? across : 1 - across;
+  return sampleBristleMask(horizontal, vertical);
+}
+
+/**
+ * Converts pressure/density into pigment contact. Lower values remove the
+ * weakest parts of a texture while remapping the strongest contacts back to
+ * opaque, instead of fading the complete brush imprint uniformly.
+ */
+export function texturedContactCoverage(
+  maskCoverage: number,
+  density: number,
+): number {
+  const normalizedDensity = clamp(density, 0, 1);
+  if (normalizedDensity === 0 || maskCoverage <= 0) return 0;
+  if (normalizedDensity === 1) return clamp(maskCoverage, 0, 1);
+  // A lightly loaded brush keeps its complete tip impression, but its weaker
+  // texture values fall away faster than its strongest bristles. This changes
+  // texture contrast instead of uniformly fading or punching binary holes.
+  return clamp(maskCoverage, 0, 1) ** (1 / normalizedDensity);
+}
+
+function sampleBristleMask(horizontal: number, vertical: number): number {
+  const x = horizontal * (BRISTLE_MASK_WIDTH - 1);
   const y = vertical * (BRISTLE_MASK_HEIGHT - 1);
   const left = Math.floor(x);
   const top = Math.floor(y);
@@ -42,8 +70,7 @@ export function sampleBrushTexture(
   const topValue = interpolate(maskAt(left, top), maskAt(right, top), amountX);
   const bottomValue = interpolate(maskAt(left, bottom), maskAt(right, bottom), amountX);
   // Discard scanner haze in the nominally transparent source background.
-  const pigment = clamp((interpolate(topValue, bottomValue, amountY) - 5) / 250, 0, 1);
-  return pigment ** BRISTLE_GRAIN_CONTRAST;
+  return clamp((interpolate(topValue, bottomValue, amountY) - 5) / 250, 0, 1);
 }
 
 function mirroredRepeat(value: number): number {

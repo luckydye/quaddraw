@@ -1,4 +1,8 @@
-import { sampleBrushTexture } from "./brush-textures";
+import {
+  sampleBrushTexture,
+  sampleBrushTip,
+  texturedContactCoverage,
+} from "./brush-textures";
 import type {
   Bounds,
   BrushTexture,
@@ -57,6 +61,30 @@ export class RasterQuadTree {
     textureSize = Math.max(startWidth, endWidth),
   ): RasterQuadTree {
     const paintColor = colorFromHex(color);
+    if (texture === "bristle") {
+      const stamps = createBristleStamps(
+        start,
+        end,
+        startWidth,
+        endWidth,
+        clamp(density, 0, 1),
+        clamp(endDensity, 0, 1),
+        textureSeed,
+        textureOffset,
+        Math.max(textureSize, 1),
+      );
+      if (stamps.length === 0) return this;
+      const nextRoot = paintBristleStamps(
+        this.root,
+        this.bounds,
+        0,
+        stamps,
+        bristleStampBounds(stamps),
+        paintColor,
+        erase,
+      );
+      return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
+    }
     const startRadius = Math.max(startWidth / 2, 0.5);
     const endRadius = Math.max(endWidth / 2, 0.5);
     const nextRoot = paintNode(
@@ -398,7 +426,13 @@ function paintNode(
         textureSize,
         textureSeed,
       );
-    const texturedCoverage = coverage * localDensity * maskCoverage;
+    const pigmentCoverage = texture === "solid"
+      ? localDensity * maskCoverage
+      : texturedContactCoverage(
+        maskCoverage,
+        localDensity,
+      );
+    const texturedCoverage = coverage * pigmentCoverage;
     if (texturedCoverage === 0) return node;
     const nextColor = composite(currentColor, paintColor, texturedCoverage, erase);
     return nextColor === currentColor ? node : uniform(nextColor);
@@ -435,6 +469,138 @@ function paintNode(
     return uniform(firstColor);
   }
 
+  return createBranchNode(children);
+}
+
+type BristleStamp = {
+  center: Point;
+  direction: Point;
+  width: number;
+  density: number;
+  seed: number;
+};
+
+const BRISTLE_STAMP_SPACING = 0.12;
+// A brush tip occupies a square footprint; the swatch's own alpha remains
+// horizontally irregular inside it. Stretching the source canvas to 2:1 makes
+// overlapping stamps flare outward at every turn.
+const BRISTLE_STAMP_ASPECT = 1;
+
+function createBristleStamps(
+  start: Point,
+  end: Point,
+  startWidth: number,
+  endWidth: number,
+  startDensity: number,
+  endDensity: number,
+  seed: number,
+  textureOffset: number,
+  textureSize: number,
+): BristleStamp[] {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) {
+    const angle = (seed >>> 0) / 0xffffffff * Math.PI * 2;
+    return [{
+      center: start,
+      direction: { x: Math.cos(angle), y: Math.sin(angle) },
+      width: Math.max(startWidth, endWidth, 1),
+      density: Math.max(startDensity, endDensity),
+      seed,
+    }];
+  }
+
+  const spacing = Math.max(textureSize * BRISTLE_STAMP_SPACING, 0.75);
+  const phase = ((textureOffset % spacing) + spacing) % spacing;
+  let distance = phase < 1e-6 || spacing - phase < 1e-6 ? 0 : spacing - phase;
+  const direction = { x: dx / length, y: dy / length };
+  const stamps: BristleStamp[] = [];
+  while (distance <= length + 1e-6) {
+    const amount = clamp(distance / length, 0, 1);
+    const stampIndex = Math.round((textureOffset + distance) / spacing);
+    stamps.push({
+      center: { x: start.x + dx * amount, y: start.y + dy * amount },
+      direction,
+      width: Math.max(startWidth + (endWidth - startWidth) * amount, 1),
+      density: startDensity + (endDensity - startDensity) * amount,
+      seed: seed ^ Math.imul(stampIndex, 0x9e3779b1),
+    });
+    distance += spacing;
+  }
+  return stamps;
+}
+
+function bristleStampBounds(stamps: readonly BristleStamp[]): Bounds {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const stamp of stamps) {
+    const halfAlong = stamp.width * BRISTLE_STAMP_ASPECT / 2;
+    const halfAcross = stamp.width / 2;
+    const extentX = Math.abs(stamp.direction.x) * halfAlong
+      + Math.abs(stamp.direction.y) * halfAcross + 1;
+    const extentY = Math.abs(stamp.direction.y) * halfAlong
+      + Math.abs(stamp.direction.x) * halfAcross + 1;
+    left = Math.min(left, stamp.center.x - extentX);
+    top = Math.min(top, stamp.center.y - extentY);
+    right = Math.max(right, stamp.center.x + extentX);
+    bottom = Math.max(bottom, stamp.center.y + extentY);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function paintBristleStamps(
+  node: QuadNode,
+  bounds: Bounds,
+  depth: number,
+  stamps: readonly BristleStamp[],
+  paintedBounds: Bounds,
+  paintColor: number,
+  erase: boolean,
+): QuadNode {
+  if (!rectanglesIntersect(bounds, paintedBounds)) return node;
+
+  if (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1)) {
+    const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    let coverage = 0;
+    for (const stamp of stamps) {
+      const relativeX = point.x - stamp.center.x;
+      const relativeY = point.y - stamp.center.y;
+      const along = relativeX * stamp.direction.x + relativeY * stamp.direction.y;
+      const across = relativeY * stamp.direction.x - relativeX * stamp.direction.y;
+      const stampCoverage = texturedContactCoverage(sampleBrushTip(
+        "bristle",
+        0.5 + along / (stamp.width * BRISTLE_STAMP_ASPECT),
+        0.5 + across / stamp.width,
+        stamp.seed,
+      ), stamp.density);
+      coverage = Math.max(coverage, stampCoverage);
+      if (coverage >= 1) break;
+    }
+    if (coverage === 0) return node;
+    const currentColor = node.color ?? representativeColor(node);
+    const nextColor = composite(currentColor, paintColor, coverage, erase);
+    return nextColor === currentColor ? node : uniform(nextColor);
+  }
+
+  const childBounds = splitBounds(bounds);
+  const oldChildren = node.children ?? [node, node, node, node];
+  const children = oldChildren.map((child, index) => paintBristleStamps(
+    child,
+    childBounds[index],
+    depth + 1,
+    stamps,
+    paintedBounds,
+    paintColor,
+    erase,
+  )) as [QuadNode, QuadNode, QuadNode, QuadNode];
+  if (children.every((child, index) => child === oldChildren[index])) return node;
+  const firstColor = children[0].color;
+  if (firstColor !== undefined && children.every((child) => child.color === firstColor)) {
+    return uniform(firstColor);
+  }
   return createBranchNode(children);
 }
 

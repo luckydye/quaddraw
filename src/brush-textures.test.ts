@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { sampleBrushTexture } from "./brush-textures";
+import {
+  sampleBrushTexture,
+  sampleBrushTip,
+  texturedContactCoverage,
+} from "./brush-textures";
 import { RasterQuadTree } from "./quadtree";
 
 describe("brush texture masks", () => {
@@ -12,17 +16,24 @@ describe("brush texture masks", () => {
     expect(sampleBrushTexture("bristle", 0.5, 1.01, 7)).toBe(0);
   });
 
-  test("bristle texture does not flatten the circular tip silhouette", () => {
-    const top = Array.from(
-      { length: 33 },
-      (_, index) => sampleBrushTexture("bristle", index / 32, 0, 8),
+  test("bristle tip uses the texture as its complete 2D silhouette", () => {
+    expect(sampleBrushTip("bristle", -0.01, 0.5, 8)).toBe(0);
+    expect(sampleBrushTip("bristle", 1.01, 0.5, 8)).toBe(0);
+
+    const dot = new RasterQuadTree({ x: -64, y: -64, width: 128, height: 128 }).paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      24,
+      24,
+      "#000000",
+      false,
+      1,
+      "bristle",
+      8,
     );
-    const bottom = Array.from(
-      { length: 33 },
-      (_, index) => sampleBrushTexture("bristle", index / 32, 1, 8),
-    );
-    expect(Math.max(...top)).toBeGreaterThan(0.6);
-    expect(Math.max(...bottom)).toBeGreaterThan(0.6);
+    const bounds = dot.occupiedBounds();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.width / bounds!.height).toBeGreaterThan(1.08);
   });
 
   test("bristle mask contains real two-dimensional opacity variation", () => {
@@ -39,6 +50,36 @@ describe("brush texture masks", () => {
     const first = sampleBrushTexture("bristle", 0.37, 0.48, 23);
     const repeated = sampleBrushTexture("bristle", 2.37, 0.48, 23);
     expect(repeated).toBeCloseTo(first, 12);
+  });
+
+  test("lower texture density removes weak contact without fading strong contact", () => {
+    expect(texturedContactCoverage(1, 0.2)).toBe(1);
+    expect(texturedContactCoverage(0.9, 0.2)).toBeCloseTo(0.9 ** 5, 12);
+    expect(texturedContactCoverage(0.5, 0.2)).toBeGreaterThan(0);
+    expect(texturedContactCoverage(0.9, 1)).toBe(0.9);
+  });
+
+  test("a low-density bristle stamp is sparse but retains opaque pigment", () => {
+    const bounds = { x: -64, y: -64, width: 128, height: 128 };
+    const stamp = (density: number) => new RasterQuadTree(bounds).paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      32,
+      32,
+      "#000000",
+      false,
+      density,
+      "bristle",
+      8,
+    );
+    const pigment = (tree: RasterQuadTree) => tree.allCells().reduce(
+      (total, { bounds: cell, color }) => total + cell.width * cell.height * (color & 0xff),
+      0,
+    );
+    const light = stamp(0.25);
+    const full = stamp(1);
+    expect(pigment(light)).toBeLessThan(pigment(full) * 0.75);
+    expect(Math.max(...light.allCells().map(({ color }) => color & 0xff))).toBeGreaterThan(245);
   });
 
   test("charcoal keeps its procedural grain coverage", () => {

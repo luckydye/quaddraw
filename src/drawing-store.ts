@@ -478,7 +478,13 @@ export class DrawingStore {
     );
     action.textureOffset += Math.hypot(end.x - start.x, end.y - start.y);
     if (nextMask !== this.actionMask) {
-      const paintedBounds = brushSegmentBounds(start, end, startWidth, endWidth);
+      const paintedBounds = brushSegmentBounds(
+        start,
+        end,
+        startWidth,
+        endWidth,
+        action.texture,
+      );
       this.actionDirtyBounds = mergeBounds(this.actionDirtyBounds, paintedBounds);
       this.actionBounds = mergeBounds(this.actionBounds, paintedBounds);
     }
@@ -884,9 +890,13 @@ function brushSegmentBounds(
   end: Point,
   startWidth: number,
   endWidth: number,
+  texture: BrushTexture,
 ): Bounds {
   // Includes the masked brush edge and the finest raster edge pixel.
-  const outset = Math.max(startWidth, endWidth) * 0.75 + 2;
+  const width = Math.max(startWidth, endWidth);
+  // Bristle tip stamps are slightly elongated and can turn, so allow more than
+  // the circular brush radius without repainting an excessively large region.
+  const outset = texture === "bristle" ? width * 0.85 + 2 : width * 0.75 + 2;
   const x = Math.min(start.x, end.x) - outset;
   const y = Math.min(start.y, end.y) - outset;
   return {
