@@ -3,8 +3,9 @@
 ## Architecture
 
 The drawing itself is a sparse raster quadtree, not a collection of retained
-vector paths. Pointer samples are converted into brush capsules that recursively
-paint immutable quadtree nodes. Uniform areas remain compressed as one node;
+vector paths. Pointer samples are transiently smoothed into cubic B-spline curves, then
+flattened into tapered brush capsules that recursively paint immutable quadtree
+nodes. Uniform areas remain compressed as one node;
 only brush edges subdivide to pixel-sized leaves. The canvas renderer traverses
 and fills the visible colored nodes directly.
 

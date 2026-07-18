@@ -21,13 +21,25 @@ export class RasterQuadTree {
   paintSegment(
     start: Point,
     end: Point,
-    width: number,
+    startWidth: number,
+    endWidth: number,
     color: string,
     erase = false,
   ): RasterQuadTree {
     const paintColor = colorFromHex(color);
-    const radius = Math.max(width / 2, 0.5);
-    const nextRoot = paintNode(this.root, this.bounds, 0, start, end, radius, paintColor, erase);
+    const startRadius = Math.max(startWidth / 2, 0.5);
+    const endRadius = Math.max(endWidth / 2, 0.5);
+    const nextRoot = paintNode(
+      this.root,
+      this.bounds,
+      0,
+      start,
+      end,
+      startRadius,
+      endRadius,
+      paintColor,
+      erase,
+    );
     return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
 
@@ -74,17 +86,20 @@ function paintNode(
   depth: number,
   start: Point,
   end: Point,
-  radius: number,
+  startRadius: number,
+  endRadius: number,
   paintColor: number,
   erase: boolean,
 ): QuadNode {
+  const maximumRadius = Math.max(startRadius, endRadius);
   const minimumDistance = Math.sqrt(distanceSquaredSegmentToRect(start, end, bounds));
-  if (minimumDistance > radius + 0.5) {
+  if (minimumDistance > maximumRadius + 0.5) {
     return node;
   }
 
   const maximumDistance = maximumCornerDistance(start, end, bounds);
-  if (maximumDistance <= Math.max(0, radius - 0.5)) {
+  const minimumRadius = Math.min(startRadius, endRadius);
+  if (maximumDistance <= Math.max(0, minimumRadius - 0.5)) {
     const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
     return node.color === replacement ? node : uniform(replacement);
   }
@@ -92,7 +107,9 @@ function paintNode(
   if (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1)) {
     const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
     const distance = Math.sqrt(distanceSquaredToSegment(center, start, end));
-    const coverage = clamp(radius + 0.5 - distance, 0, 1);
+    const amount = segmentAmount(center, start, end);
+    const localRadius = startRadius + (endRadius - startRadius) * amount;
+    const coverage = clamp(localRadius + 0.5 - distance, 0, 1);
     if (coverage === 0) return node;
     const currentColor = node.color ?? representativeColor(node);
     const nextColor = composite(currentColor, paintColor, coverage, erase);
@@ -102,7 +119,17 @@ function paintNode(
   const childBounds = splitBounds(bounds);
   const oldChildren = node.children ?? [node, node, node, node];
   const children = oldChildren.map((child, index) =>
-    paintNode(child, childBounds[index], depth + 1, start, end, radius, paintColor, erase)
+    paintNode(
+      child,
+      childBounds[index],
+      depth + 1,
+      start,
+      end,
+      startRadius,
+      endRadius,
+      paintColor,
+      erase,
+    )
   ) as [QuadNode, QuadNode, QuadNode, QuadNode];
 
   if (children.every((child, index) => child === oldChildren[index])) {
@@ -248,10 +275,18 @@ function distanceSquaredToSegment(point: Point, start: Point, end: Point): numbe
   const dy = end.y - start.y;
   const lengthSquared = dx * dx + dy * dy;
   if (lengthSquared === 0) return (point.x - start.x) ** 2 + (point.y - start.y) ** 2;
-  const amount = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1);
+  const amount = segmentAmount(point, start, end);
   const nearestX = start.x + amount * dx;
   const nearestY = start.y + amount * dy;
   return (point.x - nearestX) ** 2 + (point.y - nearestY) ** 2;
+}
+
+function segmentAmount(point: Point, start: Point, end: Point): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return 0;
+  return clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1);
 }
 
 function distanceSquaredPointToRect(point: Point, bounds: Bounds): number {

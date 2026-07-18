@@ -265,12 +265,6 @@ button {
 .status-left {
     gap: 8px;
 }
-.status-divider {
-    height: 12px;
-    width: 1px;
-    background: #dddde0;
-    margin: 0 5px;
-}
 .status-right {
     gap: 8px;
 }

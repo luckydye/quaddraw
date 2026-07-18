@@ -15,22 +15,31 @@ type StoredSnapshot = {
 export type RestoredDrawing = {
   tree: RasterQuadTree;
   strokeCount: number;
+  snapshotSizes: SnapshotSizes;
+};
+
+export type SnapshotSizes = {
+  compressedBytes: number;
+  uncompressedBytes: number;
 };
 
 /** Persists only quadtree topology and raster values—never input paths. */
-export async function saveQuadTree(tree: RasterQuadTree, strokeCount: number): Promise<void> {
+export async function saveQuadTree(tree: RasterQuadTree, strokeCount: number): Promise<SnapshotSizes | null> {
   try {
     const writer = new BinaryWriter();
     writer.writeUint32(MAGIC);
     writer.writeUint16(VERSION);
     writer.writeUint32(strokeCount);
     writeNode(writer, tree.snapshot());
-    const snapshot = await compress(writer.toBytes());
+    const bytes = writer.toBytes();
+    const snapshot = await compress(bytes);
     const database = await openDatabase();
     await writeSnapshot(database, snapshot);
     database.close();
+    return { compressedBytes: snapshot.blob.size, uncompressedBytes: bytes.byteLength };
   } catch (error) {
     console.warn("Could not save raster quadtree", error);
+    return null;
   }
 }
 
@@ -41,11 +50,19 @@ export async function loadQuadTree(): Promise<RestoredDrawing | null> {
     database.close();
     if (!snapshot) return null;
 
-    const reader = new BinaryReader(await decompress(snapshot));
+    const bytes = await decompress(snapshot);
+    const reader = new BinaryReader(bytes);
     if (reader.readUint32() !== MAGIC || reader.readUint16() !== VERSION) return null;
     const strokeCount = reader.readUint32();
     const root = readNode(reader);
-    return { tree: RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root), strokeCount };
+    return {
+      tree: RasterQuadTree.fromSnapshot(WORLD_BOUNDS, root),
+      strokeCount,
+      snapshotSizes: {
+        compressedBytes: snapshot.blob.size,
+        uncompressedBytes: bytes.byteLength,
+      },
+    };
   } catch (error) {
     console.warn("Could not restore raster quadtree", error);
     return null;

@@ -116,14 +116,14 @@ export class CanvasRenderer {
     // Filling each cell separately makes Canvas anti-alias every shared edge,
     // exposing the quadtree topology as hairline gaps. A compound path is the
     // union of all equal-color leaves, so only the outside boundary is sampled.
-    for (const [color, regions] of regionsByColor) {
+    regionsByColor.forEach((regions, color) => {
       context.beginPath();
       for (const region of regions) {
         context.rect(region.bounds.x, region.bounds.y, region.bounds.width, region.bounds.height);
       }
       context.fillStyle = rgbaToCss(color);
       context.fill();
-    }
+    });
   }
 
   private drawDebugRegions(

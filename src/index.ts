@@ -5,8 +5,8 @@ import type { BrushAction, Camera, Point, QuadDebugRegion, RasterCell, Tool } fr
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 4;
 const ZOOM_BUTTON_FACTOR = 1.2;
-const WHEEL_ZOOM_IN_FACTOR = 1.12;
-const WHEEL_ZOOM_OUT_FACTOR = 0.89;
+const WHEEL_ZOOM_SENSITIVITY = 0.0012;
+const MAX_WHEEL_DELTA = 120;
 const ERASER_WIDTH = 28;
 
 const elements = {
@@ -14,9 +14,10 @@ const elements = {
   canvas: requiredElement<HTMLCanvasElement>("#drawingCanvas"),
   minimap: requiredElement<HTMLCanvasElement>("#minimapCanvas"),
   hint: requiredElement<HTMLElement>("#canvasHint"),
-  coordinateReadout: requiredElement<HTMLElement>("#coordinateReadout"),
   strokeCount: requiredElement<HTMLElement>("#strokeCount"),
   nodeCount: requiredElement<HTMLElement>("#nodeCount"),
+  snapshotCompressedSize: requiredElement<HTMLElement>("#snapshotCompressedSize"),
+  snapshotUncompressedSize: requiredElement<HTMLElement>("#snapshotUncompressedSize"),
   weight: requiredElement<HTMLInputElement>("#weight"),
   weightValue: requiredElement<HTMLOutputElement>("#weightValue"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
@@ -64,7 +65,17 @@ function render(redrawTree = true, redrawMinimap = redrawTree): void {
 function updateStatus(): void {
   elements.strokeCount.textContent = String(store.strokeCount);
   elements.nodeCount.textContent = String(store.nodeCount);
+  elements.snapshotCompressedSize.textContent = formatByteSize(store.snapshotSizes.compressedBytes);
+  elements.snapshotUncompressedSize.textContent = formatByteSize(store.snapshotSizes.uncompressedBytes);
   elements.zoomLevel.textContent = `${Math.round(camera.zoom * 100)}%`;
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  const kilobytes = bytes / 1_024;
+  if (kilobytes < 1_024) return `${kilobytes.toFixed(kilobytes < 10 ? 1 : 0)} KB`;
+  const megabytes = kilobytes / 1_024;
+  return `${megabytes.toFixed(megabytes < 10 ? 1 : 0)} MB`;
 }
 
 function selectTool(tool: Tool): void {
@@ -95,6 +106,16 @@ function updateCameraZoom(nextZoom: number, focusPoint?: Point): void {
   }
 
   renderViewportPreview();
+}
+
+function normalizedWheelDelta(event: WheelEvent): number {
+  const modeScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? elements.area.clientHeight
+      : 1;
+  const pixelDelta = event.deltaY * modeScale;
+  return Math.max(-MAX_WHEEL_DELTA, Math.min(MAX_WHEEL_DELTA, pixelDelta));
 }
 
 function renderViewportPreview(): void {
@@ -152,9 +173,6 @@ function bindCanvasEvents(): void {
   });
 
   elements.canvas.addEventListener("pointermove", (event) => {
-    const point = renderer.screenToWorld(event, camera);
-    elements.coordinateReadout.textContent = `X: ${Math.round(point.x)}   Y: ${Math.round(point.y)}`;
-
     if (currentAction) {
       const coalescedEvents = event.getCoalescedEvents?.() ?? [event];
       for (const coalescedEvent of coalescedEvents) {
@@ -184,7 +202,7 @@ function bindCanvasEvents(): void {
         x: event.clientX - canvasBounds.left,
         y: event.clientY - canvasBounds.top,
       };
-      const zoomFactor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+      const zoomFactor = Math.exp(-normalizedWheelDelta(event) * WHEEL_ZOOM_SENSITIVITY);
 
       updateCameraZoom(camera.zoom * zoomFactor, focusPoint);
     },
@@ -281,6 +299,7 @@ function bindKeyboardShortcuts(): void {
 
 async function initialize(): Promise<void> {
   await store.restore();
+  store.subscribeSnapshotSize(updateStatus);
   bindCanvasEvents();
   bindControls();
   bindKeyboardShortcuts();

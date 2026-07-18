@@ -5,7 +5,7 @@ import { WORLD_BOUNDS } from "./types";
 describe("RasterQuadTree", () => {
   test("stores brush output in spatially queryable leaves", () => {
     const empty = new RasterQuadTree(WORLD_BOUNDS);
-    const painted = empty.paintSegment({ x: 0, y: 0 }, { x: 40, y: 20 }, 6, "#393b42");
+    const painted = empty.paintSegment({ x: 0, y: 0 }, { x: 40, y: 20 }, 6, 6, "#393b42");
 
     expect(empty.countNodes()).toBe(1);
     expect(empty.allCells()).toHaveLength(0);
@@ -21,8 +21,8 @@ describe("RasterQuadTree", () => {
 
   test("collapses uniform painted and erased regions", () => {
     const empty = new RasterQuadTree(WORLD_BOUNDS);
-    const painted = empty.paintSegment({ x: 0, y: 0 }, { x: 0, y: 0 }, 100_000, "#f35b4c");
-    const erased = painted.paintSegment({ x: 0, y: 0 }, { x: 0, y: 0 }, 100_000, "#000000", true);
+    const painted = empty.paintSegment({ x: 0, y: 0 }, { x: 0, y: 0 }, 100_000, 100_000, "#f35b4c");
+    const erased = painted.paintSegment({ x: 0, y: 0 }, { x: 0, y: 0 }, 100_000, 100_000, "#000000", true);
 
     expect(painted.countNodes()).toBe(1);
     expect(painted.allCells()).toHaveLength(1);
@@ -32,11 +32,24 @@ describe("RasterQuadTree", () => {
 
   test("shares unchanged versions instead of mutating history", () => {
     const first = new RasterQuadTree(WORLD_BOUNDS);
-    const second = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, "#4c8deb");
-    const noChange = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, "#000000", true);
+    const second = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, 3, "#4c8deb");
+    const noChange = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, 3, "#000000", true);
 
     expect(first.allCells()).toHaveLength(0);
     expect(second.allCells().length).toBeGreaterThan(0);
     expect(noChange).toBe(first);
+  });
+
+  test("interpolates width continuously across a segment", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      2,
+      20,
+      "#393b42",
+    );
+
+    expect(tree.cellsIn({ x: -1, y: 6, width: 2, height: 1 })).toHaveLength(0);
+    expect(tree.cellsIn({ x: 38, y: 6, width: 2, height: 1 }).length).toBeGreaterThan(0);
   });
 });

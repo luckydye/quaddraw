@@ -28,6 +28,8 @@ export type BrushAction = {
   points: Point[];
   color: string;
   width: number;
+  /** Number of transient input intervals already baked into the quadtree. */
+  rasterizedSegments: number;
 };
 
 /** A directly renderable, uniformly colored quadtree region. */
