@@ -39,6 +39,7 @@ export class DrawingStore {
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
+  private occupiedResolutionQueued = false;
   private persistedSnapshotSizes: SnapshotSizes = { compressedBytes: 0, uncompressedBytes: 0 };
   private occupiedResolutionValue = { width: 0, height: 0 };
   private readonly snapshotSizeListeners = new Set<() => void>();
@@ -181,6 +182,39 @@ export class DrawingStore {
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
     return this.tree.connectedIslandsTouching(area);
+  }
+
+  snapSelectionMovement(selection: RasterSelection, x: number, y: number): Point {
+    const minimumX = WORLD_BOUNDS.x - selection.bounds.x;
+    const maximumX = WORLD_BOUNDS.x + WORLD_BOUNDS.width
+      - selection.bounds.x - selection.bounds.width;
+    const minimumY = WORLD_BOUNDS.y - selection.bounds.y;
+    const maximumY = WORLD_BOUNDS.y + WORLD_BOUNDS.height
+      - selection.bounds.y - selection.bounds.height;
+    return this.tree.snapTranslation(
+      Math.min(maximumX, Math.max(minimumX, x)),
+      Math.min(maximumY, Math.max(minimumY, y)),
+    );
+  }
+
+  moveSelection(selection: RasterSelection, x: number, y: number): RasterSelection | null {
+    const offset = this.snapSelectionMovement(selection, x, y);
+    if (offset.x === 0 && offset.y === 0) return selection;
+    const nextTree = this.tree.moveCells(selection.cells, offset.x, offset.y);
+    if (nextTree === this.tree) return selection;
+
+    this.undoStack.push(this.currentState());
+    this.redoStack = [];
+    this.tree = nextTree;
+    this.queueOccupiedResolutionUpdate();
+    this.persist();
+
+    return this.tree.connectedIslandsTouchingAreas(selection.cells.map((cell) => ({
+      x: cell.bounds.x + offset.x,
+      y: cell.bounds.y + offset.y,
+      width: cell.bounds.width,
+      height: cell.bounds.height,
+    })));
   }
 
   debugLeavesIn(bounds: Bounds, scale = 1): QuadDebugRegion[] {
@@ -362,6 +396,21 @@ export class DrawingStore {
 
   private updateOccupiedResolution(): void {
     this.occupiedResolutionValue = this.tree.occupiedResolution();
+  }
+
+  private queueOccupiedResolutionUpdate(): void {
+    if (this.occupiedResolutionQueued) return;
+    this.occupiedResolutionQueued = true;
+    const update = () => {
+      this.occupiedResolutionQueued = false;
+      this.updateOccupiedResolution();
+      this.snapshotSizeListeners.forEach((listener) => listener());
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(update, { timeout: 1_000 });
+    } else {
+      globalThis.setTimeout(update, 0);
+    }
   }
 
   private persist(): void {

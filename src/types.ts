@@ -46,9 +46,14 @@ export type RasterCell = {
   color: number;
 };
 
+/** An occupied leaf with its stable address in one immutable quadtree version. */
+export type RasterSelectionCell = RasterCell & {
+  address: number;
+};
+
 /** Complete connected ink islands selected by a point or marquee query. */
 export type RasterSelection = {
-  cells: RasterCell[];
+  cells: RasterSelectionCell[];
   bounds: Bounds;
   islandCount: number;
 };

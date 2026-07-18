@@ -11,6 +11,7 @@ const TAG_TRANSPARENT = 0;
 const TAG_BRANCH = 1;
 const TAG_PALETTE = 2;
 const TAG_RAW_COLOR = 3;
+const ENCODE_BATCH_SIZE = 4_096;
 
 type StoredSnapshot = {
   blob: Blob;
@@ -38,7 +39,7 @@ export type DecodedDrawing = {
 /** Persists only quadtree topology and raster values—never input paths. */
 export async function saveQuadTree(tree: RasterQuadTree, strokeCount: number): Promise<SnapshotSizes | null> {
   try {
-    const bytes = encodeQuadTree(tree, strokeCount);
+    const bytes = await encodeQuadTreeIncrementally(tree, strokeCount);
     const snapshot = await compress(bytes);
     const database = await openDatabase();
     await writeSnapshot(database, snapshot);
@@ -103,6 +104,74 @@ export function encodeQuadTree(tree: RasterQuadTree, strokeCount: number): Uint8
     else writer.writeUint8(paletteIndex);
   });
   return writer.toBytes();
+}
+
+/** Produces the same snapshot while yielding between batches of tree work. */
+export async function encodeQuadTreeIncrementally(
+  tree: RasterQuadTree,
+  strokeCount: number,
+): Promise<Uint8Array> {
+  const nodes: QuadNode[] = [];
+  const pending = [tree.snapshot()];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    nodes.push(node);
+    if (node.children) {
+      for (let index = node.children.length - 1; index >= 0; index--) {
+        pending.push(node.children[index]);
+      }
+    }
+    if (nodes.length % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+  }
+
+  const frequencies = new Map<number, number>();
+  for (let index = 0; index < nodes.length; index++) {
+    const color = nodes[index].color;
+    if (color !== undefined && (color & 0xff) !== 0) {
+      frequencies.set(color, (frequencies.get(color) ?? 0) + 1);
+    }
+    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+  }
+  const entries: [number, number][] = [];
+  frequencies.forEach((frequency, color) => entries.push([color, frequency]));
+  const palette = entries
+    .filter(([, frequency]) => frequency > 1)
+    .sort((first, second) => second[1] - first[1])
+    .slice(0, MAX_PALETTE_COLORS)
+    .map(([color]) => color);
+  const paletteIndices = new Map(palette.map((color, index) => [color, index]));
+
+  const writer = new BinaryWriter();
+  writer.writeUint32(MAGIC);
+  writer.writeUint16(VERSION);
+  writer.writeUint32(strokeCount);
+  writer.writeUint16(palette.length);
+  palette.forEach((color) => writer.writeUint32(color));
+  writer.writeUint32(nodes.length);
+
+  const tags = new Uint8Array(Math.ceil(nodes.length / 4));
+  for (let index = 0; index < nodes.length; index++) {
+    tags[index >> 2] |= nodeTag(nodes[index], paletteIndices) << ((index & 3) * 2);
+    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+  }
+  for (let index = 0; index < tags.length; index++) {
+    writer.writeUint8(tags[index]);
+    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+  }
+  for (let index = 0; index < nodes.length; index++) {
+    const node = nodes[index];
+    if (node.color !== undefined && (node.color & 0xff) !== 0) {
+      const paletteIndex = paletteIndices.get(node.color);
+      if (paletteIndex === undefined) writer.writeUint32(node.color);
+      else writer.writeUint8(paletteIndex);
+    }
+    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+  }
+  return writer.toBytes();
+}
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 }
 
 /** Reads both compact version 2 snapshots and the original version 1 layout. */

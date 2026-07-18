@@ -372,4 +372,27 @@ describe("RasterQuadTree", () => {
     expect(selection?.cells).toHaveLength(2);
     expect(selection?.bounds).toEqual({ x: 0, y: 0, width: 2, height: 2 });
   });
+
+  test("cuts and moves selected raster cells without changing their coverage", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS)
+      .paintSegment({ x: 0, y: 0 }, { x: 30, y: 10 }, 8, 8, "#4c8deb")
+      .paintSegment({ x: 150, y: 0 }, { x: 180, y: 0 }, 8, 8, "#f35b4c");
+    const selection = tree.connectedIslandsTouching({ x: -5, y: -5, width: 10, height: 10 })!;
+    const offset = tree.snapTranslation(60, 25);
+    const coverage = (cells: readonly { bounds: { width: number; height: number }; color: number }[]) =>
+      cells.reduce((total, cell) =>
+        total + cell.bounds.width * cell.bounds.height * (cell.color & 0xff) / 255, 0);
+
+    const moved = tree.moveCells(selection.cells, offset.x, offset.y);
+    const movedSelection = moved.connectedIslandsTouchingAreas(selection.cells.map((cell) => ({
+      ...cell.bounds,
+      x: cell.bounds.x + offset.x,
+      y: cell.bounds.y + offset.y,
+    })))!;
+
+    expect(tree.connectedIslandsTouching({ x: -5, y: -5, width: 10, height: 10 })).not.toBeNull();
+    expect(moved.connectedIslandsTouching({ x: -5, y: -5, width: 10, height: 10 })).toBeNull();
+    expect(moved.connectedIslandsTouching({ x: 145, y: -5, width: 45, height: 10 })).not.toBeNull();
+    expect(coverage(movedSelection.cells)).toBeCloseTo(coverage(selection.cells), 6);
+  });
 });

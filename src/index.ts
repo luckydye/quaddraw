@@ -52,6 +52,8 @@ let renderedWorldBounds: Bounds | null = null;
 let selection: RasterSelection | null = null;
 let selectionStart: Point | null = null;
 let selectionMarquee: Bounds | null = null;
+let selectionMoveStart: Point | null = null;
+let selectionOffset: Point = { x: 0, y: 0 };
 let debugQuadtree = false;
 let isPanning = false;
 let isSpacePressed = false;
@@ -96,6 +98,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
         renderedWorldBounds,
         selection,
         selectionMarquee,
+        selectionOffset,
       ),
     );
   renderer.render(
@@ -106,6 +109,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
     renderedWorldBounds,
     selection,
     selectionMarquee,
+    selectionOffset,
   );
   if (redrawMinimap) {
     renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
@@ -210,6 +214,14 @@ function finishInteraction(completeSelection = true): void {
     currentAction = null;
   }
 
+  if (selectionMoveStart) {
+    if (completeSelection && selection) {
+      selection = store.moveSelection(selection, selectionOffset.x, selectionOffset.y);
+    }
+    selectionMoveStart = null;
+    selectionOffset = { x: 0, y: 0 };
+  }
+
   if (selectionStart) {
     if (completeSelection) {
       const area = selectionHitArea(selectionMarquee ?? boundsFromPoints(selectionStart, selectionStart));
@@ -225,6 +237,7 @@ function finishInteraction(completeSelection = true): void {
   isPanning = false;
   lastPointerPosition = null;
   elements.area.classList.remove("is-panning");
+  elements.area.classList.remove("is-moving-selection");
   window.clearTimeout(viewportSettleTimer);
   render(true, true, finishedPanning);
 }
@@ -252,6 +265,13 @@ function selectionHitArea(bounds: Bounds): Bounds {
   };
 }
 
+function pointInBounds(point: Point, bounds: Bounds): boolean {
+  return point.x >= bounds.x
+    && point.y >= bounds.y
+    && point.x <= bounds.x + bounds.width
+    && point.y <= bounds.y + bounds.height;
+}
+
 function showToast(message: string): void {
   elements.toast.textContent = message;
   elements.toast.classList.add("show");
@@ -265,6 +285,12 @@ function bindCanvasEvents(): void {
     lastPointerPosition = { x: event.clientX, y: event.clientY };
 
     if (activeTool === "select" && !isSpacePressed) {
+      if (selection && pointInBounds(point, selection.bounds)) {
+        selectionMoveStart = point;
+        selectionOffset = { x: 0, y: 0 };
+        elements.area.classList.add("is-moving-selection");
+        return;
+      }
       selection = null;
       selectionStart = point;
       selectionMarquee = boundsFromPoints(point, point);
@@ -291,6 +317,17 @@ function bindCanvasEvents(): void {
   });
 
   elements.canvas.addEventListener("pointermove", (event) => {
+    if (selectionMoveStart && selection) {
+      const point = renderer.screenToWorld(event, camera);
+      selectionOffset = store.snapSelectionMovement(
+        selection,
+        point.x - selectionMoveStart.x,
+        point.y - selectionMoveStart.y,
+      );
+      render(false, false);
+      return;
+    }
+
     if (selectionStart) {
       selectionMarquee = boundsFromPoints(selectionStart, renderer.screenToWorld(event, camera));
       render(false, false);
@@ -407,10 +444,13 @@ function bindKeyboardShortcuts(): void {
     if (event.key.toLowerCase() === "e") selectTool("eraser");
     if (event.key.toLowerCase() === "h") selectTool("hand");
     if (event.key.toLowerCase() === "v" && !event.metaKey && !event.ctrlKey) selectTool("select");
-    if (event.key === "Escape" && (selection || selectionMarquee)) {
+    if (event.key === "Escape" && (selection || selectionMarquee || selectionMoveStart)) {
       selection = null;
       selectionStart = null;
       selectionMarquee = null;
+      selectionMoveStart = null;
+      selectionOffset = { x: 0, y: 0 };
+      elements.area.classList.remove("is-moving-selection");
       render(false, false);
     }
     if (event.key.toLowerCase() === "q" && !event.metaKey && !event.ctrlKey && !event.repeat) {

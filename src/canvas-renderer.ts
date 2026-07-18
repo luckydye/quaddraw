@@ -104,6 +104,7 @@ export class CanvasRenderer {
     renderedWorldBounds: Bounds | null,
     selection: RasterSelection | null = null,
     marquee: Bounds | null = null,
+    selectionOffset: Point = { x: 0, y: 0 },
   ): void {
     const viewport = this.area.getBoundingClientRect();
     if (redrawTree) {
@@ -125,7 +126,7 @@ export class CanvasRenderer {
     this.context.clearRect(0, 0, viewport.width, viewport.height);
     this.drawGrid(viewport, camera);
     this.context.drawImage(this.treeCanvas, 0, 0, viewport.width, viewport.height);
-    this.drawSelection(camera, selection, marquee);
+    this.drawSelection(viewport, camera, selection, marquee, selectionOffset);
   }
 
   /** Queues a committed-cache rasterization without blocking the UI thread. */
@@ -295,25 +296,53 @@ export class CanvasRenderer {
   }
 
   private drawSelection(
+    viewport: DOMRect,
     camera: Camera,
     selection: RasterSelection | null,
     marquee: Bounds | null,
+    selectionOffset: Point,
   ): void {
     if (!selection && !marquee) return;
+    const isMoving = selection !== null
+      && (selectionOffset.x !== 0 || selectionOffset.y !== 0);
+
+    if (selection && isMoving) {
+      // Cut the selected occupied leaves out of the cached image for the live
+      // preview, then restore the clipped grid underneath them.
+      this.context.save();
+      this.context.translate(camera.x, camera.y);
+      this.context.scale(camera.zoom, camera.zoom);
+      this.addCellsToPath(selection.cells, this.context);
+      this.context.globalCompositeOperation = "destination-out";
+      this.context.fillStyle = "#000";
+      this.context.fill();
+      this.context.restore();
+
+      this.context.save();
+      this.context.translate(camera.x, camera.y);
+      this.context.scale(camera.zoom, camera.zoom);
+      this.addCellsToPath(selection.cells, this.context);
+      this.context.clip();
+      this.context.setTransform(this.pixelScale, 0, 0, this.pixelScale, 0, 0);
+      this.drawGrid(viewport, camera);
+      this.context.restore();
+
+      this.context.save();
+      this.context.translate(camera.x, camera.y);
+      this.context.scale(camera.zoom, camera.zoom);
+      this.context.translate(selectionOffset.x, selectionOffset.y);
+      this.drawCells(selection.cells, this.context);
+      this.context.restore();
+    }
+
     this.context.save();
     this.context.translate(camera.x, camera.y);
     this.context.scale(camera.zoom, camera.zoom);
 
     if (selection) {
-      this.context.beginPath();
-      for (const cell of selection.cells) {
-        this.context.rect(
-          cell.bounds.x,
-          cell.bounds.y,
-          cell.bounds.width,
-          cell.bounds.height,
-        );
-      }
+      this.context.save();
+      this.context.translate(selectionOffset.x, selectionOffset.y);
+      this.addCellsToPath(selection.cells, this.context);
       this.context.fillStyle = "rgb(91 93 209 / 0.22)";
       this.context.fill();
       this.context.strokeStyle = "rgb(75 77 196 / 0.9)";
@@ -325,6 +354,7 @@ export class CanvasRenderer {
         selection.bounds.width,
         selection.bounds.height,
       );
+      this.context.restore();
     }
 
     if (marquee) {
@@ -337,6 +367,16 @@ export class CanvasRenderer {
     }
 
     this.context.restore();
+  }
+
+  private addCellsToPath(
+    cells: readonly RasterCell[],
+    context: CanvasRenderingContext2D,
+  ): void {
+    context.beginPath();
+    for (const cell of cells) {
+      context.rect(cell.bounds.x, cell.bounds.y, cell.bounds.width, cell.bounds.height);
+    }
   }
 
   private drawDebugRegions(

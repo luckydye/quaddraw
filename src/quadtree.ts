@@ -5,6 +5,7 @@ import type {
   QuadDebugRegion,
   RasterCell,
   RasterSelection,
+  RasterSelectionCell,
 } from "./types";
 
 export type QuadLeafNode = { readonly color: number; readonly children?: undefined };
@@ -114,22 +115,112 @@ export class RasterQuadTree {
    * edges avoids flattening the sparse raster into a world-sized pixel grid.
    */
   connectedIslandsTouching(area: Bounds): RasterSelection | null {
-    const cells = this.allCells();
-    if (cells.length === 0) return null;
+    return this.connectedIslandsTouchingAreas([area]);
+  }
 
-    const components = connectedCellComponents(cells);
-    const touchedRoots = new Set<number>();
-    cells.forEach((cell, index) => {
-      if (rectanglesIntersect(cell.bounds, area)) touchedRoots.add(components.find(index));
-    });
-    if (touchedRoots.size === 0) return null;
+  /** Selects complete islands seeded by any of the supplied occupied areas. */
+  connectedIslandsTouchingAreas(areas: readonly Bounds[]): RasterSelection | null {
+    if (areas.length === 0) return null;
+    const seeds = new Map<number, IndexedRasterCell>();
+    const addSeed: IndexedCellVisitor = (x, y, width, height, color, address) => {
+      if (!seeds.has(address)) {
+        seeds.set(address, { bounds: { x, y, width, height }, color, address });
+      }
+    };
+    for (const area of areas) {
+      this.visitIndexedCells(area, addSeed);
+    }
+    if (seeds.size === 0) return null;
 
-    const selectedCells = cells.filter((_, index) => touchedRoots.has(components.find(index)));
+    const selected = new Map<number, IndexedRasterCell>();
+    const neighborOutset = Math.min(this.bounds.width, this.bounds.height)
+      / 2 ** MAX_DEPTH / 4;
+    let islandCount = 0;
+    let pending: IndexedRasterCell[] = [];
+    const addNeighbor: IndexedCellVisitor = (x, y, width, height, color, address) => {
+      if (selected.has(address)) return;
+      const neighbor = { bounds: { x, y, width, height }, color, address };
+      selected.set(address, neighbor);
+      pending.push(neighbor);
+    };
+
+    for (const seed of seeds.values()) {
+      if (selected.has(seed.address)) continue;
+      islandCount += 1;
+      selected.set(seed.address, seed);
+      pending = [seed];
+
+      for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex++) {
+        const cell = pending[pendingIndex];
+        this.visitIndexedCells(expandBounds(cell.bounds, neighborOutset), addNeighbor);
+      }
+    }
+
+    const selectedCells = [...selected.values()];
     return {
       cells: selectedCells,
       bounds: enclosingBounds(selectedCells),
-      islandCount: touchedRoots.size,
+      islandCount,
     };
+  }
+
+  private visitIndexedCells(area: Bounds, visitor: IndexedCellVisitor): void {
+    collectIndexedCells(
+      this.root,
+      this.bounds.x,
+      this.bounds.y,
+      this.bounds.width,
+      this.bounds.height,
+      area,
+      1,
+      visitor,
+    );
+  }
+
+  /** Snaps a movement vector to the persistent raster's finest grid. */
+  snapTranslation(x: number, y: number): Point {
+    const columns = 2 ** MAX_DEPTH;
+    const stepX = this.bounds.width / columns;
+    const stepY = this.bounds.height / columns;
+    return {
+      x: Math.round(x / stepX) * stepX,
+      y: Math.round(y / stepY) * stepY,
+    };
+  }
+
+  /** Cuts selected leaves and composites their colors at a translated position. */
+  moveCells(cells: readonly RasterSelectionCell[], x: number, y: number): RasterQuadTree {
+    if (cells.length === 0 || (x === 0 && y === 0)) return this;
+    const selectedAddresses = new Set<number>();
+    const affectedBranches = new Set<number>();
+    for (const cell of cells) {
+      selectedAddresses.add(cell.address);
+      for (let address = Math.floor(cell.address / 4); address >= 1; address = Math.floor(address / 4)) {
+        affectedBranches.add(address);
+      }
+    }
+    let nextRoot = removeSelectedCells(
+      this.root,
+      this.bounds,
+      selectedAddresses,
+      affectedBranches,
+      1,
+    );
+    for (const cell of cells) {
+      nextRoot = compositeRectangle(
+        nextRoot,
+        this.bounds,
+        0,
+        {
+          x: cell.bounds.x + x,
+          y: cell.bounds.y + y,
+          width: cell.bounds.width,
+          height: cell.bounds.height,
+        },
+        cell.color,
+      );
+    }
+    return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
 
   debugLeavesIn(area: Bounds, scale = 1): QuadDebugRegion[] {
@@ -391,6 +482,40 @@ function collectCells(
   collectCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, cells);
   collectCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, cells);
   collectCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, cells);
+}
+
+type IndexedRasterCell = RasterSelectionCell;
+type IndexedCellVisitor = (
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  color: number,
+  address: number,
+) => void;
+
+function collectIndexedCells(
+  node: QuadNode,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  area: Bounds,
+  address: number,
+  visitor: IndexedCellVisitor,
+): void {
+  if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
+  if (!isBranchNode(node)) {
+    if ((node.color & 0xff) !== 0) visitor(x, y, width, height, node.color, address);
+    return;
+  }
+
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  collectIndexedCells(node.children[0], x, y, halfWidth, halfHeight, area, address * 4, visitor);
+  collectIndexedCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, address * 4 + 1, visitor);
+  collectIndexedCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, address * 4 + 2, visitor);
+  collectIndexedCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, address * 4 + 3, visitor);
 }
 
 function occupiedBounds(node: QuadNode, bounds: Bounds): Bounds | null {
@@ -658,97 +783,87 @@ function rectanglesIntersect(first: Bounds, second: Bounds): boolean {
     && first.y + first.height > second.y;
 }
 
-type CellInterval = {
-  cell: number;
-  start: number;
-  end: number;
-};
-
-type SharedBoundary = {
-  before: CellInterval[];
-  after: CellInterval[];
-};
-
-/** Builds connected components from shared leaf boundaries, including corners. */
-function connectedCellComponents(cells: readonly RasterCell[]): DisjointSet {
-  const components = new DisjointSet(cells.length);
-  const vertical = new Map<number, SharedBoundary>();
-  const horizontal = new Map<number, SharedBoundary>();
-
-  cells.forEach(({ bounds }, cell) => {
-    addBoundaryInterval(
-      vertical,
-      bounds.x,
-      "after",
-      { cell, start: bounds.y, end: bounds.y + bounds.height },
-    );
-    addBoundaryInterval(
-      vertical,
-      bounds.x + bounds.width,
-      "before",
-      { cell, start: bounds.y, end: bounds.y + bounds.height },
-    );
-    addBoundaryInterval(
-      horizontal,
-      bounds.y,
-      "after",
-      { cell, start: bounds.x, end: bounds.x + bounds.width },
-    );
-    addBoundaryInterval(
-      horizontal,
-      bounds.y + bounds.height,
-      "before",
-      { cell, start: bounds.x, end: bounds.x + bounds.width },
-    );
-  });
-
-  vertical.forEach((boundary) => unionTouchingIntervals(boundary, components));
-  horizontal.forEach((boundary) => unionTouchingIntervals(boundary, components));
-  return components;
+function expandBounds(bounds: Bounds, amount: number): Bounds {
+  return {
+    x: bounds.x - amount,
+    y: bounds.y - amount,
+    width: bounds.width + amount * 2,
+    height: bounds.height + amount * 2,
+  };
 }
 
-function addBoundaryInterval(
-  boundaries: Map<number, SharedBoundary>,
-  coordinate: number,
-  side: keyof SharedBoundary,
-  interval: CellInterval,
-): void {
-  let boundary = boundaries.get(coordinate);
-  if (!boundary) {
-    boundary = { before: [], after: [] };
-    boundaries.set(coordinate, boundary);
+function removeSelectedCells(
+  node: QuadNode,
+  bounds: Bounds,
+  selectedAddresses: ReadonlySet<number>,
+  affectedBranches: ReadonlySet<number>,
+  address: number,
+): QuadNode {
+  if (!selectedAddresses.has(address) && !affectedBranches.has(address)) return node;
+  if (!isBranchNode(node)) {
+    return selectedAddresses.has(address) ? uniform(TRANSPARENT) : node;
   }
-  boundary[side].push(interval);
+  const childBounds = splitBounds(bounds);
+  const children = node.children.map((child, index) =>
+    removeSelectedCells(
+      child,
+      childBounds[index],
+      selectedAddresses,
+      affectedBranches,
+      address * 4 + index,
+    )
+  ) as [QuadNode, QuadNode, QuadNode, QuadNode];
+  if (children.every((child, index) => child === node.children[index])) return node;
+  return collapsedNode(children);
 }
 
-function unionTouchingIntervals(boundary: SharedBoundary, components: DisjointSet): void {
-  const before = boundary.before.sort(compareIntervals);
-  const after = boundary.after.sort(compareIntervals);
-  let beforeIndex = 0;
-  let afterIndex = 0;
-
-  while (beforeIndex < before.length && afterIndex < after.length) {
-    const first = before[beforeIndex];
-    const second = after[afterIndex];
-    if (first.end < second.start) {
-      beforeIndex += 1;
-      continue;
-    }
-    if (second.end < first.start) {
-      afterIndex += 1;
-      continue;
-    }
-
-    // Closed intervals deliberately include a single shared corner, giving
-    // diagonal brush pixels the same 8-connected behavior as an image editor.
-    components.union(first.cell, second.cell);
-    if (first.end <= second.end) beforeIndex += 1;
-    if (second.end <= first.end) afterIndex += 1;
+function compositeRectangle(
+  node: QuadNode,
+  bounds: Bounds,
+  depth: number,
+  rectangle: Bounds,
+  sourceColor: number,
+): QuadNode {
+  if (!rectanglesIntersect(bounds, rectangle)) return node;
+  const fullyCovered = rectangleContains(rectangle, bounds);
+  if (fullyCovered && (sourceColor & 0xff) === 255) return uniform(sourceColor);
+  if (fullyCovered && !isBranchNode(node)) {
+    const nextColor = composite(node.color, sourceColor, (sourceColor & 0xff) / 255, false, false);
+    return nextColor === node.color ? node : uniform(nextColor);
   }
+  if (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1)) {
+    const nextColor = composite(
+      representativeColor(node),
+      sourceColor,
+      (sourceColor & 0xff) / 255,
+      false,
+      false,
+    );
+    return uniform(nextColor);
+  }
+
+  const childBounds = splitBounds(bounds);
+  const oldChildren = node.children ?? [node, node, node, node];
+  const children = oldChildren.map((child, index) =>
+    compositeRectangle(child, childBounds[index], depth + 1, rectangle, sourceColor)
+  ) as [QuadNode, QuadNode, QuadNode, QuadNode];
+  if (children.every((child, index) => child === oldChildren[index])) return node;
+  return collapsedNode(children);
 }
 
-function compareIntervals(first: CellInterval, second: CellInterval): number {
-  return first.start - second.start || first.end - second.end;
+function rectangleContains(container: Bounds, contained: Bounds): boolean {
+  return container.x <= contained.x
+    && container.y <= contained.y
+    && container.x + container.width >= contained.x + contained.width
+    && container.y + container.height >= contained.y + contained.height;
+}
+
+function collapsedNode(children: readonly [QuadNode, QuadNode, QuadNode, QuadNode]): QuadNode {
+  const firstColor = children[0].color;
+  if (firstColor !== undefined && children.every((child) => child.color === firstColor)) {
+    return uniform(firstColor);
+  }
+  return createBranchNode(children);
 }
 
 function enclosingBounds(cells: readonly RasterCell[]): Bounds {
@@ -763,38 +878,6 @@ function enclosingBounds(cells: readonly RasterCell[]): Bounds {
     bottom = Math.max(bottom, cell.bounds.y + cell.bounds.height);
   }
   return { x: left, y: top, width: right - left, height: bottom - top };
-}
-
-class DisjointSet {
-  private readonly parents: Int32Array;
-  private readonly ranks: Uint8Array;
-
-  constructor(size: number) {
-    this.parents = Int32Array.from({ length: size }, (_, index) => index);
-    this.ranks = new Uint8Array(size);
-  }
-
-  find(value: number): number {
-    let root = value;
-    while (this.parents[root] !== root) root = this.parents[root];
-    while (this.parents[value] !== value) {
-      const parent = this.parents[value];
-      this.parents[value] = root;
-      value = parent;
-    }
-    return root;
-  }
-
-  union(first: number, second: number): void {
-    let firstRoot = this.find(first);
-    let secondRoot = this.find(second);
-    if (firstRoot === secondRoot) return;
-    if (this.ranks[firstRoot] < this.ranks[secondRoot]) {
-      [firstRoot, secondRoot] = [secondRoot, firstRoot];
-    }
-    this.parents[secondRoot] = firstRoot;
-    if (this.ranks[firstRoot] === this.ranks[secondRoot]) this.ranks[firstRoot] += 1;
-  }
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

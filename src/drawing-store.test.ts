@@ -78,3 +78,33 @@ describe("DrawingStore stylus pressure", () => {
     expect(action.points[action.points.length - 1].strength!).toBeGreaterThan(lightWidth);
   });
 });
+
+describe("DrawingStore selection movement", () => {
+  test("records a move as one undoable history operation", () => {
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { requestIdleCallback: () => 0 },
+    });
+
+    try {
+      const store = new DrawingStore();
+      const action = store.createStroke({ x: 0, y: 0, time: 0 }, "#4c8deb", 8);
+      store.commit(action);
+      const selection = store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })!;
+      const offset = store.snapSelectionMovement(selection, 80, 30);
+
+      const movedSelection = store.moveSelection(selection, offset.x, offset.y);
+
+      expect(movedSelection).not.toBeNull();
+      expect(store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })).toBeNull();
+      expect(store.undo()).toBe(true);
+      expect(store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })).not.toBeNull();
+      expect(store.redo()).toBe(true);
+      expect(store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })).toBeNull();
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+});

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { RasterQuadTree } from "./quadtree";
-import { decodeQuadTree, encodeQuadTree } from "./quadtree-storage";
+import {
+  decodeQuadTree,
+  encodeQuadTree,
+  encodeQuadTreeIncrementally,
+} from "./quadtree-storage";
 import { WORLD_BOUNDS } from "./types";
 
 describe("compact quadtree snapshots", () => {
@@ -38,5 +42,20 @@ describe("compact quadtree snapshots", () => {
     expect(decoded?.version).toBe(1);
     expect(decoded?.strokeCount).toBe(3);
     expect(decoded?.tree.snapshot()).toEqual({ color: 0x8855d4ff });
+  });
+
+  test("incremental encoding is byte-identical to synchronous encoding", async () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: -80, y: 40 },
+      { x: 120, y: -60 },
+      12,
+      5,
+      "#53b66e",
+    );
+
+    const synchronous = encodeQuadTree(tree, 11);
+    const incremental = await encodeQuadTreeIncrementally(tree, 11);
+
+    expect(incremental).toEqual(synchronous);
   });
 });
