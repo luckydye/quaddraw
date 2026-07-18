@@ -23,10 +23,12 @@ const FINE_LOD_CELL_PIXELS = 1.25;
 const COARSE_LOD_CELL_PIXELS = 2.5;
 const FINE_LOD_ZOOM = 0.75;
 const COARSE_LOD_ZOOM = 0.35;
+const OCCUPIED_BOUNDS_CACHE_MIN_NODES = 128;
 const CHARCOAL_RADIUS_VARIATION_MAX = 1.04;
 const CHARCOAL_FEATHER_FACTOR = 0.32;
 const CHARCOAL_FEATHER_MINIMUM = 1.25;
 const CHARCOAL_FEATHER_OUTSET = 0.45;
+const occupiedBoundsCache = new WeakMap<QuadNode, Bounds | null>();
 
 /**
  * A persistent sparse raster. Every uniform region is one node; brush edges
@@ -566,23 +568,48 @@ function collectIndexedCells(
 }
 
 function occupiedBounds(node: QuadNode, bounds: Bounds): Bounds | null {
-  if (!isBranchNode(node)) return (node.color & 0xff) === 0 ? null : bounds;
+  const occupied = normalizedOccupiedBounds(node);
+  return occupied && {
+    x: bounds.x + occupied.x * bounds.width,
+    y: bounds.y + occupied.y * bounds.height,
+    width: occupied.width * bounds.width,
+    height: occupied.height * bounds.height,
+  };
+}
 
-  const childBounds = splitBounds(bounds);
+/**
+ * Caches only substantial immutable subtrees. New brush versions share most
+ * of these nodes, so exact occupied bounds become proportional to the edit
+ * instead of requiring a whole-document traversal after every stroke.
+ */
+function normalizedOccupiedBounds(node: QuadNode): Bounds | null {
+  if (!isBranchNode(node)) {
+    return (node.color & 0xff) === 0 ? null : { x: 0, y: 0, width: 1, height: 1 };
+  }
+  const cacheResult = node.nodeCount >= OCCUPIED_BOUNDS_CACHE_MIN_NODES;
+  if (cacheResult && occupiedBoundsCache.has(node)) return occupiedBoundsCache.get(node)!;
+
   let occupied: Bounds | null = null;
   node.children.forEach((child, index) => {
-    const childOccupied = occupiedBounds(child, childBounds[index]);
+    const childOccupied = normalizedOccupiedBounds(child);
     if (!childOccupied) return;
+    const mapped = {
+      x: (index % 2) * 0.5 + childOccupied.x * 0.5,
+      y: (index >= 2 ? 0.5 : 0) + childOccupied.y * 0.5,
+      width: childOccupied.width * 0.5,
+      height: childOccupied.height * 0.5,
+    };
     if (!occupied) {
-      occupied = childOccupied;
+      occupied = mapped;
       return;
     }
-    const right = Math.max(occupied.x + occupied.width, childOccupied.x + childOccupied.width);
-    const bottom = Math.max(occupied.y + occupied.height, childOccupied.y + childOccupied.height);
-    const x = Math.min(occupied.x, childOccupied.x);
-    const y = Math.min(occupied.y, childOccupied.y);
+    const right = Math.max(occupied.x + occupied.width, mapped.x + mapped.width);
+    const bottom = Math.max(occupied.y + occupied.height, mapped.y + mapped.height);
+    const x = Math.min(occupied.x, mapped.x);
+    const y = Math.min(occupied.y, mapped.y);
     occupied = { x, y, width: right - x, height: bottom - y };
   });
+  if (cacheResult) occupiedBoundsCache.set(node, occupied);
   return occupied;
 }
 

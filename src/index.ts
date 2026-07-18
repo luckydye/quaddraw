@@ -199,16 +199,21 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
       visibleCells,
       visibleDebugRegions,
       renderedWorldBounds,
-      () => renderer.render(
-        camera,
-        visibleCells,
-        visibleDebugRegions,
-        false,
-        renderedWorldBounds,
-        selection,
-        selectionMarquee,
-        selectionOffset,
-      ),
+      () => {
+        renderer.render(
+          camera,
+          visibleCells,
+          visibleDebugRegions,
+          false,
+          renderedWorldBounds,
+          selection,
+          selectionMarquee,
+          selectionOffset,
+        );
+        if (currentAction && store.activeActionBounds) {
+          renderActionRegion(store.activeActionBounds);
+        }
+      },
     );
   renderer.render(
     camera,
@@ -224,6 +229,40 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
     renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
   }
   updateStatus();
+}
+
+function renderActionRegion(bounds = store.consumeActionDirtyBounds()): void {
+  if (!bounds) return;
+  // Include the full averaged LOD cells touched by the edit at low zoom.
+  const padding = 3 / camera.zoom;
+  const renderBounds = {
+    x: bounds.x - padding,
+    y: bounds.y - padding,
+    width: bounds.width + padding * 2,
+    height: bounds.height + padding * 2,
+  };
+  const cells = store.visibleIn(renderBounds, camera.zoom);
+  const debugRegions = debugQuadtree ? store.debugLeavesIn(renderBounds, camera.zoom) : [];
+  if (!renderer.renderTreeRegion(camera, cells, debugRegions, renderBounds)) {
+    render(true, false, true);
+    return;
+  }
+  updateStatus();
+}
+
+function renderActionOverview(bounds: Bounds): void {
+  const padding = 3 / renderer.overviewScale;
+  const renderBounds = {
+    x: bounds.x - padding,
+    y: bounds.y - padding,
+    width: bounds.width + padding * 2,
+    height: bounds.height + padding * 2,
+  };
+  renderer.renderOverviewRegion(
+    camera,
+    store.visibleIn(renderBounds, renderer.overviewScale),
+    renderBounds,
+  );
 }
 
 function updateStatus(): void {
@@ -307,6 +346,7 @@ function renderViewportPreview(): void {
 }
 
 function beginDrawing(point: Point): void {
+  window.clearTimeout(viewportSettleTimer);
   selection = null;
   currentAction = store.createStroke(
     point,
@@ -318,14 +358,22 @@ function beginDrawing(point: Point): void {
     Number(elements.dynamics.value) / 100,
   );
   elements.hint.style.opacity = "0";
-  render(true, false);
+  render(false, false);
 }
 
 function finishInteraction(completeSelection = true): void {
   const finishedPanning = isPanning && currentAction === null;
+  const finishedDrawing = currentAction !== null;
   if (currentAction) {
-    if (completeSelection) store.commit(currentAction);
-    else store.cancelAction();
+    const actionBounds = store.activeActionBounds;
+    if (completeSelection) {
+      store.commit(currentAction);
+      renderActionRegion();
+    } else {
+      store.cancelAction();
+      if (actionBounds) renderActionRegion(actionBounds);
+    }
+    if (actionBounds) renderActionOverview(actionBounds);
     currentAction = null;
   }
 
@@ -354,7 +402,11 @@ function finishInteraction(completeSelection = true): void {
   elements.area.classList.remove("is-panning");
   elements.area.classList.remove("is-moving-selection");
   window.clearTimeout(viewportSettleTimer);
-  render(true, true, finishedPanning);
+  if (finishedDrawing) {
+    updateStatus();
+    return;
+  }
+  render(true, true, finishedPanning || finishedDrawing);
 }
 
 function cancelToolInteraction(): void {
@@ -602,9 +654,10 @@ function bindCanvasEvents(): void {
     }
 
     if (activeTool === "eraser" && !isSpacePressed) {
+      window.clearTimeout(viewportSettleTimer);
       selection = null;
       currentAction = store.createEraser(point, ERASER_WIDTH);
-      render(true, false);
+      renderActionRegion();
       return;
     }
 
@@ -645,7 +698,7 @@ function bindCanvasEvents(): void {
       for (const coalescedEvent of coalescedEvents) {
         store.appendPoint(currentAction, renderer.screenToWorld(coalescedEvent, camera));
       }
-      render(true, false);
+      renderActionRegion();
       return;
     }
 

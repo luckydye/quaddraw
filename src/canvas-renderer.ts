@@ -149,6 +149,52 @@ export class CanvasRenderer {
     this.drawSelection(viewport, camera, selection, marquee, selectionOffset);
   }
 
+  /** Re-rasterizes a localized world-space edit into the existing camera cache. */
+  renderTreeRegion(
+    camera: Camera,
+    cells: readonly RasterCell[],
+    debugRegions: readonly QuadDebugRegion[],
+    worldBounds: Bounds,
+  ): boolean {
+    if (
+      !this.committedWorldBounds
+      || camera.x !== this.committedCamera.x
+      || camera.y !== this.committedCamera.y
+      || camera.zoom !== this.committedCamera.zoom
+    ) return false;
+
+    // A localized edit is newer than any full-frame worker request already in
+    // flight. Ignore that bitmap so it cannot overwrite the patched stroke.
+    this.renderRequestId += 1;
+    this.pendingWorkerRender = null;
+    this.committedTreeContext.save();
+    this.committedTreeContext.translate(
+      this.committedCamera.x + this.cacheMarginX,
+      this.committedCamera.y + this.cacheMarginY,
+    );
+    this.committedTreeContext.scale(this.committedCamera.zoom, this.committedCamera.zoom);
+    this.committedTreeContext.clearRect(
+      worldBounds.x,
+      worldBounds.y,
+      worldBounds.width,
+      worldBounds.height,
+    );
+    this.committedTreeContext.beginPath();
+    this.committedTreeContext.rect(
+      worldBounds.x,
+      worldBounds.y,
+      worldBounds.width,
+      worldBounds.height,
+    );
+    this.committedTreeContext.clip();
+    this.drawCells(cells, this.committedTreeContext);
+    this.drawDebugRegions(debugRegions, this.committedTreeContext, this.committedCamera.zoom);
+    this.committedTreeContext.restore();
+
+    this.render(camera, [], [], false, this.committedWorldBounds);
+    return true;
+  }
+
   /** Queues a committed-cache rasterization without blocking the UI thread. */
   renderTreeOffThread(
     camera: Camera,
@@ -198,13 +244,45 @@ export class CanvasRenderer {
   }
 
   renderMinimap(camera: Camera, cells: readonly RasterCell[]): void {
-    const { width, height } = this.minimap;
     this.overviewContext.clearRect(0, 0, this.overviewCanvas.width, this.overviewCanvas.height);
     this.overviewContext.save();
     this.overviewContext.translate(-WORLD_BOUNDS.x * OVERVIEW_SCALE, -WORLD_BOUNDS.y * OVERVIEW_SCALE);
     this.overviewContext.scale(OVERVIEW_SCALE, OVERVIEW_SCALE);
     this.drawCells(cells, this.overviewContext);
     this.overviewContext.restore();
+    this.drawMinimap(camera);
+  }
+
+  /** Updates the persistent world overview after a localized drawing edit. */
+  renderOverviewRegion(
+    camera: Camera,
+    cells: readonly RasterCell[],
+    worldBounds: Bounds,
+  ): void {
+    this.overviewContext.save();
+    this.overviewContext.translate(-WORLD_BOUNDS.x * OVERVIEW_SCALE, -WORLD_BOUNDS.y * OVERVIEW_SCALE);
+    this.overviewContext.scale(OVERVIEW_SCALE, OVERVIEW_SCALE);
+    this.overviewContext.clearRect(
+      worldBounds.x,
+      worldBounds.y,
+      worldBounds.width,
+      worldBounds.height,
+    );
+    this.overviewContext.beginPath();
+    this.overviewContext.rect(
+      worldBounds.x,
+      worldBounds.y,
+      worldBounds.width,
+      worldBounds.height,
+    );
+    this.overviewContext.clip();
+    this.drawCells(cells, this.overviewContext);
+    this.overviewContext.restore();
+    this.drawMinimap(camera);
+  }
+
+  private drawMinimap(camera: Camera): void {
+    const { width, height } = this.minimap;
 
     this.minimapContext.clearRect(0, 0, width, height);
     this.minimapContext.fillStyle = "#fbfbfb";

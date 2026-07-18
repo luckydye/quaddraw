@@ -49,6 +49,30 @@ describe("RasterQuadTree", () => {
     expect(full.occupiedResolution()).toEqual({ width: 32_768, height: 32_768 });
   });
 
+  test("keeps cached occupied bounds correct across immutable edits", () => {
+    const first = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: -200, y: 0 },
+      { x: -100, y: 0 },
+      12,
+      12,
+      "#393b42",
+    );
+    const firstBounds = first.occupiedBounds()!;
+    expect(first.occupiedBounds()).toEqual(firstBounds);
+
+    const expanded = first.paintSegment(
+      { x: 100, y: 0 },
+      { x: 200, y: 0 },
+      12,
+      12,
+      "#393b42",
+    );
+    const expandedBounds = expanded.occupiedBounds()!;
+
+    expect(expandedBounds.x).toBe(firstBounds.x);
+    expect(expandedBounds.x + expandedBounds.width).toBeGreaterThan(200);
+  });
+
   test("shares unchanged versions instead of mutating history", () => {
     const first = new RasterQuadTree(WORLD_BOUNDS);
     const second = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, 3, "#4c8deb");

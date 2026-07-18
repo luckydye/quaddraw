@@ -78,6 +78,25 @@ describe("DrawingStore brush cancellation", () => {
   });
 });
 
+describe("DrawingStore live brush regions", () => {
+  test("reports only raster bounds changed since the previous render", () => {
+    const store = new DrawingStore();
+    const action = store.createEraser({ x: 10, y: 20 }, 12);
+    const initial = store.consumeActionDirtyBounds();
+
+    expect(initial).not.toBeNull();
+    expect(initial!.x).toBeLessThan(10);
+    expect(initial!.y).toBeLessThan(20);
+    expect(store.consumeActionDirtyBounds()).toBeNull();
+
+    store.appendPoint(action, { x: 30, y: 40 });
+    const moved = store.consumeActionDirtyBounds();
+    expect(moved).not.toBeNull();
+    expect(moved!.x + moved!.width).toBeGreaterThan(30);
+    expect(moved!.y + moved!.height).toBeGreaterThan(40);
+  });
+});
+
 describe("DrawingStore brush density", () => {
   test("forwards density into the rasterized stroke", () => {
     const store = new DrawingStore();

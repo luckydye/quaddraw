@@ -42,6 +42,7 @@ const CURVE_FLATNESS = 0.2;
 const MAX_CURVE_DEPTH = 8;
 const PRESSURE_SAMPLE_DELTA = 0.015;
 const PRESSURE_RESPONSE_DELTA = 0.5;
+const PERSISTENCE_DEBOUNCE_MS = 750;
 
 /** Owns layer edits, brush transactions, history, and sparse raster trees. */
 export class DrawingStore {
@@ -51,9 +52,12 @@ export class DrawingStore {
   private actionStart: DrawingState | null = null;
   private actionMask: RasterQuadTree | null = null;
   private actionLayerId: LayerId | null = null;
+  private actionDirtyBounds: Bounds | null = null;
+  private actionBounds: Bounds | null = null;
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
+  private persistenceNotBefore = 0;
   private occupiedResolutionQueued = false;
   private persistedSnapshotSizes: SnapshotSizes = { compressedBytes: 0, uncompressedBytes: 0 };
   private occupiedResolutionValue = { width: 0, height: 0 };
@@ -166,7 +170,7 @@ export class DrawingStore {
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
-    this.queueOccupiedResolutionUpdate();
+    this.updateOccupiedResolution();
     this.persist();
   }
 
@@ -229,6 +233,18 @@ export class DrawingStore {
       for (const cell of cellsForLayer(layer, WORLD_BOUNDS, scale)) visible.push(cell);
     }
     return visible;
+  }
+
+  /** Raster area changed since the previous live brush render. */
+  consumeActionDirtyBounds(): Bounds | null {
+    const dirty = this.actionDirtyBounds;
+    this.actionDirtyBounds = null;
+    return dirty;
+  }
+
+  /** Complete raster area touched by the active brush transaction. */
+  get activeActionBounds(): Bounds | null {
+    return this.actionBounds;
   }
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
@@ -391,6 +407,8 @@ export class DrawingStore {
       this.actionStart = this.currentState();
       this.actionMask = new RasterQuadTree(WORLD_BOUNDS);
       this.actionLayerId = this.document.activeLayerId;
+      this.actionDirtyBounds = null;
+      this.actionBounds = null;
     }
     const action: BrushAction = {
       kind,
@@ -420,7 +438,7 @@ export class DrawingStore {
     endDensity = densityForPoint(action, end),
   ): void {
     if (!this.actionStart || !this.actionMask) return;
-    this.actionMask = this.actionMask.paintSegment(
+    const nextMask = this.actionMask.paintSegment(
       start,
       end,
       startWidth,
@@ -432,6 +450,12 @@ export class DrawingStore {
       action.textureSeed,
       endDensity,
     );
+    if (nextMask !== this.actionMask) {
+      const paintedBounds = brushSegmentBounds(start, end, startWidth, endWidth);
+      this.actionDirtyBounds = mergeBounds(this.actionDirtyBounds, paintedBounds);
+      this.actionBounds = mergeBounds(this.actionBounds, paintedBounds);
+    }
+    this.actionMask = nextMask;
   }
 
   private applyActionMask(action: BrushAction): void {
@@ -539,6 +563,8 @@ export class DrawingStore {
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
+    this.actionDirtyBounds = null;
+    this.actionBounds = null;
     this.updateOccupiedResolution();
   }
 
@@ -570,7 +596,7 @@ export class DrawingStore {
       this.updateOccupiedResolution();
       this.snapshotSizeListeners.forEach((listener) => listener());
     };
-    if (typeof window.requestIdleCallback === "function") {
+    if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
       window.requestIdleCallback(update, { timeout: 1_000 });
     } else {
       globalThis.setTimeout(update, 0);
@@ -579,24 +605,34 @@ export class DrawingStore {
 
   private persist(): void {
     this.persistencePending = true;
+    this.persistenceNotBefore = Date.now() + PERSISTENCE_DEBOUNCE_MS;
     if (this.persistenceQueued || this.persistenceWriting) return;
 
     this.persistenceQueued = true;
-    const writeTree = () => void this.flushPersistence();
-    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(writeTree, { timeout: 1_000 });
-    else globalThis.setTimeout(writeTree, 0);
+    const writeWhenQuiet = () => {
+      const delay = this.persistenceNotBefore - Date.now();
+      if (delay > 0) {
+        globalThis.setTimeout(writeWhenQuiet, delay);
+        return;
+      }
+      void this.flushPersistence();
+    };
+    if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(writeWhenQuiet, { timeout: 1_000 });
+    } else {
+      globalThis.setTimeout(writeWhenQuiet, 0);
+    }
   }
 
   private async flushPersistence(): Promise<void> {
     this.persistenceQueued = false;
     if (this.persistenceWriting) return;
     this.persistenceWriting = true;
-    while (this.persistencePending) {
-      this.persistencePending = false;
-      const snapshotSizes = await saveDrawing(this.document);
-      if (snapshotSizes !== null) this.setSnapshotSizes(snapshotSizes);
-    }
+    this.persistencePending = false;
+    const snapshotSizes = await saveDrawing(this.document);
+    if (snapshotSizes !== null) this.setSnapshotSizes(snapshotSizes);
     this.persistenceWriting = false;
+    if (this.persistencePending) this.persist();
   }
 
   private setSnapshotSizes(sizes: SnapshotSizes): void {
@@ -804,6 +840,33 @@ function widthFromVelocity(velocity: number, baseWidth: number): number {
   const velocityFactor = Math.min(velocity / MAX_WIDTH_VELOCITY, 1);
   const widthFactor = SLOW_WIDTH_FACTOR + velocityFactor * (FAST_WIDTH_FACTOR - SLOW_WIDTH_FACTOR);
   return baseWidth * widthFactor;
+}
+
+function brushSegmentBounds(
+  start: Point,
+  end: Point,
+  startWidth: number,
+  endWidth: number,
+): Bounds {
+  // Includes charcoal radius variation, feathering, and the raster edge pixel.
+  const outset = Math.max(startWidth, endWidth) * 0.75 + 2;
+  const x = Math.min(start.x, end.x) - outset;
+  const y = Math.min(start.y, end.y) - outset;
+  return {
+    x,
+    y,
+    width: Math.max(start.x, end.x) + outset - x,
+    height: Math.max(start.y, end.y) + outset - y,
+  };
+}
+
+function mergeBounds(current: Bounds | null, next: Bounds): Bounds {
+  if (!current) return next;
+  const x = Math.min(current.x, next.x);
+  const y = Math.min(current.y, next.y);
+  const right = Math.max(current.x + current.width, next.x + next.width);
+  const bottom = Math.max(current.y + current.height, next.y + next.height);
+  return { x, y, width: right - x, height: bottom - y };
 }
 
 function cellsForLayer(layer: DrawingLayer, bounds: Bounds, scale: number): RasterCell[] {
