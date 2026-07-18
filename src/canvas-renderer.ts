@@ -16,7 +16,6 @@ import type {
   RasterSelection,
 } from "./types";
 
-const GRID_SIZE = 40;
 const MINIMAP_SCALE = 0.012;
 const OVERVIEW_SCALE = 0.08;
 const CACHE_MARGIN_FACTOR = 0.2;
@@ -124,7 +123,6 @@ export class CanvasRenderer {
     this.treeContext.clearRect(0, 0, viewport.width, viewport.height);
     this.drawTreeForCamera(viewport, camera);
     this.context.clearRect(0, 0, viewport.width, viewport.height);
-    this.drawGrid(viewport, camera);
     this.context.drawImage(this.treeCanvas, 0, 0, viewport.width, viewport.height);
     this.drawSelection(viewport, camera, selection, marquee, selectionOffset);
   }
@@ -308,7 +306,7 @@ export class CanvasRenderer {
 
     if (selection && isMoving) {
       // Cut the selected occupied leaves out of the cached image for the live
-      // preview, then restore the clipped grid underneath them.
+      // preview so the canvas background shows underneath them.
       this.context.save();
       this.context.translate(camera.x, camera.y);
       this.context.scale(camera.zoom, camera.zoom);
@@ -316,15 +314,6 @@ export class CanvasRenderer {
       this.context.globalCompositeOperation = "destination-out";
       this.context.fillStyle = "#000";
       this.context.fill();
-      this.context.restore();
-
-      this.context.save();
-      this.context.translate(camera.x, camera.y);
-      this.context.scale(camera.zoom, camera.zoom);
-      this.addCellsToPath(selection.cells, this.context);
-      this.context.clip();
-      this.context.setTransform(this.pixelScale, 0, 0, this.pixelScale, 0, 0);
-      this.drawGrid(viewport, camera);
       this.context.restore();
 
       this.context.save();
@@ -394,21 +383,6 @@ export class CanvasRenderer {
       context.strokeRect(region.bounds.x, region.bounds.y, region.bounds.width, region.bounds.height);
     }
     context.restore();
-  }
-
-  private drawGrid(viewport: DOMRect, camera: Camera): void {
-    const step = GRID_SIZE * camera.zoom;
-    const firstX = ((camera.x % step) + step) % step;
-    const firstY = ((camera.y % step) + step) % step;
-    this.context.save();
-    this.context.strokeStyle = "#ececec";
-    this.context.lineWidth = 1;
-    for (let x = firstX; x < viewport.width; x += step) this.drawLine(this.context, x + 0.5, 0, x + 0.5, viewport.height);
-    for (let y = firstY; y < viewport.height; y += step) this.drawLine(this.context, 0, y + 0.5, viewport.width, y + 0.5);
-    this.context.strokeStyle = "#dddde0";
-    this.drawLine(this.context, 0, camera.y + 0.5, viewport.width, camera.y + 0.5);
-    this.drawLine(this.context, camera.x + 0.5, 0, camera.x + 0.5, viewport.height);
-    this.context.restore();
   }
 
   private drawTreeForCamera(viewport: DOMRect, camera: Camera): void {
