@@ -1,4 +1,9 @@
 import { CanvasRenderer } from "./canvas-renderer";
+import {
+  cameraAfterGesture,
+  gestureFrame,
+  type GestureFrame,
+} from "./canvas-navigation";
 import { DrawingStore } from "./drawing-store";
 import type {
   Bounds,
@@ -15,13 +20,27 @@ import type {
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 4;
 const ZOOM_BUTTON_FACTOR = 1.2;
-const WHEEL_ZOOM_SENSITIVITY = 0.0012;
+const PINCH_ZOOM_SENSITIVITY = 0.01;
 const MAX_WHEEL_DELTA = 120;
 const ERASER_WIDTH = 28;
+
+const BRUSH_PRESETS = {
+  ink: { label: "Ink", density: 100, dynamics: 100, texture: "solid" },
+  marker: { label: "Marker", density: 55, dynamics: 15, texture: "solid" },
+  charcoal: { label: "Charcoal", density: 72, dynamics: 85, texture: "charcoal" },
+} as const satisfies Record<string, {
+  label: string;
+  density: number;
+  dynamics: number;
+  texture: BrushTexture;
+}>;
+
+type BrushPresetId = keyof typeof BRUSH_PRESETS;
 
 const elements = {
   area: requiredElement<HTMLElement>("#canvasArea"),
   canvas: requiredElement<HTMLCanvasElement>("#drawingCanvas"),
+  brushCursor: requiredElement<HTMLElement>("#brushCursor"),
   minimap: requiredElement<HTMLCanvasElement>("#minimapCanvas"),
   hint: requiredElement<HTMLElement>("#canvasHint"),
   strokeCount: requiredElement<HTMLElement>("#strokeCount"),
@@ -36,6 +55,7 @@ const elements = {
   dynamics: requiredElement<HTMLInputElement>("#dynamics"),
   dynamicsValue: requiredElement<HTMLOutputElement>("#dynamicsValue"),
   brushTexture: requiredElement<HTMLSelectElement>("#brushTexture"),
+  brushSettingsValue: requiredElement<HTMLElement>("#brushSettingsValue"),
   inspector: requiredElement<HTMLElement>("#inspector"),
   layerList: requiredElement<HTMLElement>("#layerList"),
   layerOpacity: requiredElement<HTMLInputElement>("#layerOpacity"),
@@ -68,6 +88,9 @@ let debugQuadtree = false;
 let isPanning = false;
 let isSpacePressed = false;
 let lastPointerPosition: Point | null = null;
+const touchPointers = new Map<number, Point>();
+let touchNavigationActive = false;
+let previousTouchGesture: GestureFrame | null = null;
 let viewportSettleTimer: number | undefined;
 let textureSeed = Date.now() >>> 0;
 
@@ -82,6 +105,76 @@ function requiredElement<T extends Element>(selector: string): T {
     throw new Error(`Required UI element not found: ${selector}`);
   }
   return element;
+}
+
+function selectBrushPreset(presetId: BrushPresetId): void {
+  const preset = BRUSH_PRESETS[presetId];
+  elements.density.value = String(preset.density);
+  elements.dynamics.value = String(preset.dynamics);
+  elements.brushTexture.value = preset.texture;
+  elements.densityValue.textContent = `${preset.density}%`;
+  elements.dynamicsValue.textContent = `${preset.dynamics}%`;
+  updateBrushPresetState();
+}
+
+function updateBrushCursor(): void {
+  const density = Number(elements.density.value) / 100;
+  const dynamics = Number(elements.dynamics.value) / 100;
+  const screenSize = Number(elements.weight.value) * camera.zoom;
+  const color = colorChannels(activeColor);
+
+  elements.brushCursor.dataset.texture = elements.brushTexture.value;
+  elements.brushCursor.toggleAttribute("data-small", screenSize <= 4);
+  elements.brushCursor.style.setProperty("--brush-cursor-size", `${screenSize}px`);
+  elements.brushCursor.style.setProperty(
+    "--brush-cursor-fill",
+    `rgb(${color.red} ${color.green} ${color.blue} / ${density * 0.16})`,
+  );
+  elements.brushCursor.style.setProperty(
+    "--brush-cursor-dynamics-scale",
+    String(1 - dynamics * 0.58),
+  );
+  elements.brushCursor.style.setProperty(
+    "--brush-cursor-dynamics-opacity",
+    String(dynamics * 0.55),
+  );
+}
+
+function colorChannels(color: string): { red: number; green: number; blue: number } {
+  const value = color.startsWith("#") ? color.slice(1) : color;
+  const normalized = value.length === 3
+    ? [...value].map((channel) => channel + channel).join("")
+    : value;
+  const parsed = Number.parseInt(normalized, 16);
+  return {
+    red: (parsed >> 16) & 0xff,
+    green: (parsed >> 8) & 0xff,
+    blue: parsed & 0xff,
+  };
+}
+
+function updateBrushPresetState(): void {
+  const density = Number(elements.density.value);
+  const dynamics = Number(elements.dynamics.value);
+  const texture = elements.brushTexture.value as BrushTexture;
+  const activePreset = (Object.entries(BRUSH_PRESETS) as Array<[
+    BrushPresetId,
+    (typeof BRUSH_PRESETS)[BrushPresetId],
+  ]>).find(([, preset]) => (
+    preset.density === density
+    && preset.dynamics === dynamics
+    && preset.texture === texture
+  ))?.[0];
+
+  document.querySelectorAll<HTMLButtonElement>("[data-brush-preset]").forEach((button) => {
+    const isSelected = button.dataset.brushPreset === activePreset;
+    button.classList.toggle("selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+  });
+  elements.brushSettingsValue.textContent = activePreset
+    ? BRUSH_PRESETS[activePreset].label
+    : "Custom";
+  updateBrushCursor();
 }
 
 function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false): void {
@@ -179,16 +272,20 @@ function updateCameraZoom(nextZoom: number, focusPoint?: Point): void {
     camera.y = focusPoint.y - (focusPoint.y - camera.y) * zoomRatio;
   }
 
+  updateBrushCursor();
   renderViewportPreview();
 }
 
-function normalizedWheelDelta(event: WheelEvent): number {
-  const modeScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+function wheelModeScale(event: WheelEvent): number {
+  return event.deltaMode === WheelEvent.DOM_DELTA_LINE
     ? 16
     : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
       ? elements.area.clientHeight
       : 1;
-  const pixelDelta = event.deltaY * modeScale;
+}
+
+function normalizedWheelDelta(event: WheelEvent): number {
+  const pixelDelta = event.deltaY * wheelModeScale(event);
   return Math.max(-MAX_WHEEL_DELTA, Math.min(MAX_WHEEL_DELTA, pixelDelta));
 }
 
@@ -221,7 +318,8 @@ function beginDrawing(point: Point): void {
 function finishInteraction(completeSelection = true): void {
   const finishedPanning = isPanning && currentAction === null;
   if (currentAction) {
-    store.commit(currentAction);
+    if (completeSelection) store.commit(currentAction);
+    else store.cancelAction();
     currentAction = null;
   }
 
@@ -251,6 +349,68 @@ function finishInteraction(completeSelection = true): void {
   elements.area.classList.remove("is-moving-selection");
   window.clearTimeout(viewportSettleTimer);
   render(true, true, finishedPanning);
+}
+
+function cancelToolInteraction(): void {
+  if (currentAction) {
+    store.cancelAction();
+    currentAction = null;
+  }
+  selectionMoveStart = null;
+  selectionStart = null;
+  selectionMarquee = null;
+  selectionOffset = { x: 0, y: 0 };
+  isPanning = false;
+  lastPointerPosition = null;
+  elements.area.classList.remove("is-moving-selection");
+}
+
+function beginTouchNavigation(): void {
+  cancelToolInteraction();
+  touchNavigationActive = true;
+  previousTouchGesture = gestureFrame(touchPointers.values());
+  isPanning = true;
+  elements.area.classList.add("is-panning");
+  // A second finger may interrupt a brush preview. Rebuild once from the
+  // restored document before cheap camera-only previews take over.
+  render(true, false);
+}
+
+function updateTouchNavigation(): void {
+  const nextGesture = gestureFrame(touchPointers.values());
+  if (!nextGesture || !previousTouchGesture) {
+    previousTouchGesture = nextGesture;
+    return;
+  }
+
+  const canvasBounds = elements.canvas.getBoundingClientRect();
+  const previous = {
+    ...previousTouchGesture,
+    center: {
+      x: previousTouchGesture.center.x - canvasBounds.left,
+      y: previousTouchGesture.center.y - canvasBounds.top,
+    },
+  };
+  const next = {
+    ...nextGesture,
+    center: {
+      x: nextGesture.center.x - canvasBounds.left,
+      y: nextGesture.center.y - canvasBounds.top,
+    },
+  };
+  camera = cameraAfterGesture(camera, previous, next, ZOOM_MIN, ZOOM_MAX);
+  previousTouchGesture = nextGesture;
+  updateBrushCursor();
+  renderViewportPreview();
+}
+
+function finishTouchNavigation(): void {
+  touchNavigationActive = false;
+  previousTouchGesture = null;
+  isPanning = false;
+  elements.area.classList.remove("is-panning");
+  window.clearTimeout(viewportSettleTimer);
+  render(true, true, true);
 }
 
 function boundsFromPoints(first: Point, second: Point): Bounds {
@@ -388,8 +548,32 @@ function renderAfterLayerChange(message?: string): void {
 }
 
 function bindCanvasEvents(): void {
+  const positionBrushCursor = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") {
+      elements.area.classList.remove("has-brush-pointer");
+      return;
+    }
+    const bounds = elements.area.getBoundingClientRect();
+    elements.brushCursor.style.left = `${event.clientX - bounds.left}px`;
+    elements.brushCursor.style.top = `${event.clientY - bounds.top}px`;
+    elements.area.classList.add("has-brush-pointer");
+  };
+  elements.canvas.addEventListener("pointerenter", positionBrushCursor);
+  elements.canvas.addEventListener("pointermove", positionBrushCursor);
+  elements.canvas.addEventListener("pointerleave", () => {
+    elements.area.classList.remove("has-brush-pointer");
+  });
+
   elements.canvas.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
     elements.canvas.setPointerCapture(event.pointerId);
+
+    if (event.pointerType === "touch") {
+      touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (touchPointers.size >= 2) beginTouchNavigation();
+      if (touchNavigationActive) return;
+    }
+
     const point = renderer.screenToWorld(event, camera);
     lastPointerPosition = { x: event.clientX, y: event.clientY };
 
@@ -426,6 +610,14 @@ function bindCanvasEvents(): void {
   });
 
   elements.canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch" && touchPointers.has(event.pointerId)) {
+      touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (touchNavigationActive) {
+        updateTouchNavigation();
+        return;
+      }
+    }
+
     if (selectionMoveStart && selection) {
       const point = renderer.screenToWorld(event, camera);
       selectionOffset = store.snapSelectionMovement(
@@ -460,19 +652,45 @@ function bindCanvasEvents(): void {
     }
   });
 
-  elements.canvas.addEventListener("pointerup", () => finishInteraction());
-  elements.canvas.addEventListener("pointercancel", () => finishInteraction(false));
+  const finishPointer = (event: PointerEvent, completeInteraction: boolean): void => {
+    if (event.pointerType !== "touch") {
+      finishInteraction(completeInteraction);
+      return;
+    }
+
+    touchPointers.delete(event.pointerId);
+    if (touchNavigationActive) {
+      if (touchPointers.size >= 2) {
+        previousTouchGesture = gestureFrame(touchPointers.values());
+      } else if (touchPointers.size === 0) {
+        finishTouchNavigation();
+      }
+      return;
+    }
+    finishInteraction(completeInteraction);
+  };
+
+  elements.canvas.addEventListener("pointerup", (event) => finishPointer(event, true));
+  elements.canvas.addEventListener("pointercancel", (event) => finishPointer(event, false));
 
   elements.area.addEventListener(
     "wheel",
     (event) => {
       event.preventDefault();
+      if (!event.ctrlKey) {
+        const modeScale = wheelModeScale(event);
+        camera.x -= event.deltaX * modeScale;
+        camera.y -= event.deltaY * modeScale;
+        renderViewportPreview();
+        return;
+      }
+
       const canvasBounds = elements.canvas.getBoundingClientRect();
       const focusPoint = {
         x: event.clientX - canvasBounds.left,
         y: event.clientY - canvasBounds.top,
       };
-      const zoomFactor = Math.exp(-normalizedWheelDelta(event) * WHEEL_ZOOM_SENSITIVITY);
+      const zoomFactor = Math.exp(-normalizedWheelDelta(event) * PINCH_ZOOM_SENSITIVITY);
 
       updateCameraZoom(camera.zoom * zoomFactor, focusPoint);
     },
@@ -490,14 +708,26 @@ function bindControls(): void {
 
   elements.weight.addEventListener("input", () => {
     elements.weightValue.textContent = `${elements.weight.value} px`;
+    updateBrushCursor();
   });
 
   elements.density.addEventListener("input", () => {
     elements.densityValue.textContent = `${elements.density.value}%`;
+    updateBrushPresetState();
   });
 
   elements.dynamics.addEventListener("input", () => {
     elements.dynamicsValue.textContent = `${elements.dynamics.value}%`;
+    updateBrushPresetState();
+  });
+
+  elements.brushTexture.addEventListener("change", updateBrushPresetState);
+
+  document.querySelectorAll<HTMLButtonElement>("[data-brush-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const presetId = button.dataset.brushPreset as BrushPresetId;
+      if (presetId in BRUSH_PRESETS) selectBrushPreset(presetId);
+    });
   });
 
   elements.layerOpacity.addEventListener("input", () => {
@@ -540,6 +770,7 @@ function bindControls(): void {
       activeColor = button.dataset.color!;
       document.querySelectorAll("#swatches button").forEach((swatch) => swatch.classList.remove("selected"));
       button.classList.add("selected");
+      updateBrushCursor();
     });
   });
 
@@ -640,6 +871,7 @@ async function initialize(): Promise<void> {
   bindCanvasEvents();
   bindControls();
   bindKeyboardShortcuts();
+  updateBrushCursor();
   renderLayerPanel();
   new ResizeObserver(() => {
     renderer.resize();

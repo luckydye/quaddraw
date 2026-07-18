@@ -38,21 +38,42 @@
             </button>
           </aside>
           <canvas id="drawingCanvas"></canvas>
-          <div class="canvas-hint" id="canvasHint"><kbd>V</kbd> select and move islands &nbsp;·&nbsp; <kbd>Space</kbd> + drag to pan &nbsp;·&nbsp; scroll to zoom</div>
+          <div class="brush-cursor" id="brushCursor" aria-hidden="true"><span class="brush-cursor-crosshair"></span></div>
+          <div class="canvas-hint" id="canvasHint"><kbd>V</kbd> select and move islands &nbsp;·&nbsp; two fingers or <kbd>Space</kbd> + drag to pan &nbsp;·&nbsp; pinch to zoom</div>
           <aside class="inspector" id="inspector">
             <div class="inspector-header"><span>STROKE</span></div>
             <label>Color</label>
             <div class="swatches" id="swatches">
               <button data-color="#393b42" style="--swatch:#393b42" class="selected"></button><button data-color="#f35b4c" style="--swatch:#f35b4c"></button><button data-color="#f6ba38" style="--swatch:#f6ba38"></button><button data-color="#53b66e" style="--swatch:#53b66e"></button><button data-color="#4c8deb" style="--swatch:#4c8deb"></button><button data-color="#8855d4" style="--swatch:#8855d4"></button>
             </div>
-            <label for="brushTexture">Texture</label>
-            <select id="brushTexture">
-              <option value="solid">Solid</option>
-              <option value="charcoal">Charcoal</option>
-            </select>
+            <div class="control-label" id="brushPresetLabel">Brush</div>
+            <div class="brush-presets" role="group" aria-labelledby="brushPresetLabel">
+              <button class="brush-preset selected" type="button" data-brush-preset="ink" aria-pressed="true" title="Crisp, pressure-responsive strokes">
+                <span class="brush-sample brush-sample-ink" aria-hidden="true"></span>
+                <span>Ink</span>
+              </button>
+              <button class="brush-preset" type="button" data-brush-preset="marker" aria-pressed="false" title="Translucent strokes with a consistent width">
+                <span class="brush-sample brush-sample-marker" aria-hidden="true"></span>
+                <span>Marker</span>
+              </button>
+              <button class="brush-preset" type="button" data-brush-preset="charcoal" aria-pressed="false" title="Grainy, pressure-responsive strokes">
+                <span class="brush-sample brush-sample-charcoal" aria-hidden="true"></span>
+                <span>Charcoal</span>
+              </button>
+            </div>
             <label>Weight <div class="weight-row"><input id="weight" type="range" min="1" max="42" value="3" /><output id="weightValue">3 px</output></div></label>
-            <label>Density <div class="weight-row"><input id="density" type="range" min="1" max="100" value="100" /><output id="densityValue">100%</output></div></label>
-            <label>Dynamics <div class="weight-row"><input id="dynamics" type="range" min="0" max="100" value="100" title="How much velocity and stylus pressure affect stroke thickness" /><output id="dynamicsValue">100%</output></div></label>
+            <details class="brush-settings">
+              <summary>Brush settings <span id="brushSettingsValue">Ink</span></summary>
+              <div class="brush-settings-body">
+                <label for="brushTexture">Texture</label>
+                <select id="brushTexture">
+                  <option value="solid">Solid</option>
+                  <option value="charcoal">Charcoal</option>
+                </select>
+                <label>Density <div class="weight-row"><input id="density" type="range" min="1" max="100" value="100" /><output id="densityValue">100%</output></div></label>
+                <label>Dynamics <div class="weight-row"><input id="dynamics" type="range" min="0" max="100" value="100" title="How much velocity and stylus pressure affect stroke thickness" /><output id="dynamicsValue">100%</output></div></label>
+              </div>
+            </details>
             <section class="layers-panel" aria-labelledby="layersHeading">
               <div class="layers-header">
                 <span id="layersHeading">LAYERS</span>

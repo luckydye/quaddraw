@@ -170,6 +170,12 @@ export class DrawingStore {
     this.persist();
   }
 
+  /** Discards the active brush transaction without adding it to history. */
+  cancelAction(): void {
+    if (!this.actionStart) return;
+    this.restoreState(this.actionStart);
+  }
+
   undo(): boolean {
     const previous = this.undoStack.pop();
     if (!previous) return false;

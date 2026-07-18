@@ -60,6 +60,24 @@ describe("DrawingStore velocity initialization", () => {
   });
 });
 
+describe("DrawingStore brush cancellation", () => {
+  test("restores the document without adding a history entry", () => {
+    const store = new DrawingStore();
+    const action = store.createStroke({ x: 0, y: 0 }, "#393b42", 8, 1, "solid", 0, 0);
+    store.appendPoint(action, { x: 5, y: 0 });
+    store.appendPoint(action, { x: 10, y: 0 });
+    store.appendPoint(action, { x: 15, y: 0 });
+    store.appendPoint(action, { x: 20, y: 0 });
+    expect(store.nodeCount).toBeGreaterThan(1);
+
+    store.cancelAction();
+
+    expect(store.strokeCount).toBe(0);
+    expect(store.nodeCount).toBe(1);
+    expect(store.undo()).toBe(false);
+  });
+});
+
 describe("DrawingStore brush density", () => {
   test("forwards density into the rasterized stroke", () => {
     const store = new DrawingStore();
