@@ -210,6 +210,7 @@ button {
 .brush-cursor[data-small] .brush-cursor-crosshair {
     opacity: 1;
 }
+.brush-cursor[data-texture="bristle"],
 .brush-cursor[data-texture="charcoal"] {
     border-style: dashed;
 }
@@ -329,10 +330,12 @@ button {
 .brush-sample-ink::before {
     height: 3px;
 }
-.brush-sample-marker::before {
-    top: 6px;
-    height: 7px;
-    opacity: 0.55;
+.brush-sample-bristle::before {
+    inset: 2px 0;
+    opacity: 0.86;
+    background: currentColor;
+    -webkit-mask: url("./assets/bristle-mask.png") center / 100% 100% no-repeat;
+    mask: url("./assets/bristle-mask.png") center / 100% 100% no-repeat;
 }
 .brush-sample-charcoal::before {
     top: 5px;

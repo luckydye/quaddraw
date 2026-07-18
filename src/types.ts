@@ -23,7 +23,7 @@ export type Camera = {
 };
 
 export type Tool = "select" | "pen" | "eraser" | "hand";
-export type BrushTexture = "solid" | "charcoal";
+export type BrushTexture = "solid" | "bristle" | "charcoal";
 
 /** Ephemeral pointer input. It is never rendered or persisted as a path. */
 export type BrushAction = {
@@ -36,8 +36,10 @@ export type BrushAction = {
   /** Brush pigment density, expressed as a normalized opacity from 0 to 1. */
   density: number;
   texture: BrushTexture;
-  /** Keeps procedural grain stable for the lifetime of this gesture. */
+  /** Keeps the mask phase and orientation stable for the lifetime of this gesture. */
   textureSeed: number;
+  /** Distance travelled through the repeating 2D brush-tip mask. */
+  textureOffset: number;
   /** Number of transient input intervals already baked into the quadtree. */
   rasterizedSegments: number;
 };

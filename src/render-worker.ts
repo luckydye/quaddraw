@@ -83,21 +83,30 @@ function renderWorkerMain(): void {
       else regionsByColor.set(color, [offset]);
     }
 
+    const transform = context.getTransform();
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
     groups.forEach((regionsByColor) => {
       regionsByColor.forEach((regions, color) => {
         context.beginPath();
         for (const offset of regions) {
-          context.rect(
-            view.getFloat32(offset, true),
-            view.getFloat32(offset + 4, true),
-            view.getFloat32(offset + 8, true),
-            view.getFloat32(offset + 12, true),
-          );
+          const x = view.getFloat32(offset, true);
+          const y = view.getFloat32(offset + 4, true);
+          const width = view.getFloat32(offset + 8, true);
+          const height = view.getFloat32(offset + 12, true);
+          const left = Math.round(x * transform.a + transform.e);
+          const top = Math.round(y * transform.d + transform.f);
+          const right = Math.round((x + width) * transform.a + transform.e);
+          const bottom = Math.round((y + height) * transform.d + transform.f);
+          if (right > left && bottom > top) {
+            context.rect(left, top, right - left, bottom - top);
+          }
         }
         context.fillStyle = rgbaToCss(color);
         context.fill();
       });
     });
+    context.restore();
   }
 
   function drawDebugRegions(buffer: ArrayBuffer, zoom: number): void {

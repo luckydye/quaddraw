@@ -442,6 +442,7 @@ export class DrawingStore {
       density: Math.max(0, Math.min(1, density)),
       texture,
       textureSeed,
+      textureOffset: 0,
       rasterizedSegments: 0,
     };
     if (kind === "eraser") {
@@ -472,7 +473,10 @@ export class DrawingStore {
       action.texture,
       action.textureSeed,
       endDensity,
+      action.textureOffset,
+      action.width,
     );
+    action.textureOffset += Math.hypot(end.x - start.x, end.y - start.y);
     if (nextMask !== this.actionMask) {
       const paintedBounds = brushSegmentBounds(start, end, startWidth, endWidth);
       this.actionDirtyBounds = mergeBounds(this.actionDirtyBounds, paintedBounds);
@@ -881,7 +885,7 @@ function brushSegmentBounds(
   startWidth: number,
   endWidth: number,
 ): Bounds {
-  // Includes charcoal radius variation, feathering, and the raster edge pixel.
+  // Includes the masked brush edge and the finest raster edge pixel.
   const outset = Math.max(startWidth, endWidth) * 0.75 + 2;
   const x = Math.min(start.x, end.x) - outset;
   const y = Math.min(start.y, end.y) - outset;

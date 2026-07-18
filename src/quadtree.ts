@@ -1,3 +1,4 @@
+import { sampleBrushTexture } from "./brush-textures";
 import type {
   Bounds,
   BrushTexture,
@@ -52,6 +53,8 @@ export class RasterQuadTree {
     texture: BrushTexture = "solid",
     textureSeed = 0,
     endDensity = density,
+    textureOffset = 0,
+    textureSize = Math.max(startWidth, endWidth),
   ): RasterQuadTree {
     const paintColor = colorFromHex(color);
     const startRadius = Math.max(startWidth / 2, 0.5);
@@ -70,6 +73,8 @@ export class RasterQuadTree {
       clamp(endDensity, 0, 1),
       texture,
       textureSeed,
+      textureOffset,
+      Math.max(textureSize, 1),
     );
     return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
@@ -324,6 +329,8 @@ function paintNode(
   endDensity: number,
   texture: BrushTexture,
   textureSeed: number,
+  textureOffset: number,
+  textureSize: number,
 ): QuadNode {
   const maximumBaseRadius = Math.max(startRadius, endRadius);
   const maximumRadius = texture === "charcoal"
@@ -379,7 +386,20 @@ function paintNode(
       : clamp(texturedRadius + 0.5 - distance, 0, 1);
     if (coverage === 0) return node;
     const currentColor = node.color ?? representativeColor(node);
-    const texturedCoverage = coverage * localDensity * textureCoverage(texture, center, textureSeed);
+    const maskCoverage = texture === "charcoal"
+      ? charcoalTextureCoverage(center, textureSeed)
+      : bristleTextureCoverage(
+        texture,
+        center,
+        start,
+        end,
+        localRadius,
+        textureOffset,
+        textureSize,
+        textureSeed,
+      );
+    const texturedCoverage = coverage * localDensity * maskCoverage;
+    if (texturedCoverage === 0) return node;
     const nextColor = composite(currentColor, paintColor, texturedCoverage, erase);
     return nextColor === currentColor ? node : uniform(nextColor);
   }
@@ -401,6 +421,8 @@ function paintNode(
       endDensity,
       texture,
       textureSeed,
+      textureOffset,
+      textureSize,
     )
   ) as [QuadNode, QuadNode, QuadNode, QuadNode];
 
@@ -416,9 +438,48 @@ function paintNode(
   return createBranchNode(children);
 }
 
-function textureCoverage(texture: BrushTexture, point: Point, seed: number): number {
+function bristleTextureCoverage(
+  texture: BrushTexture,
+  point: Point,
+  start: Point,
+  end: Point,
+  radius: number,
+  textureOffset: number,
+  textureSize: number,
+  seed: number,
+): number {
   if (texture === "solid") return 1;
 
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  let alongDistance: number;
+  let acrossDistance: number;
+  if (length > 0) {
+    const relativeX = point.x - start.x;
+    const relativeY = point.y - start.y;
+    alongDistance = (relativeX * dx + relativeY * dy) / length;
+    acrossDistance = (relativeY * dx - relativeX * dy) / length;
+  } else {
+    const angle = (seed >>> 0) / 0xffffffff * Math.PI * 2;
+    const relativeX = point.x - start.x;
+    const relativeY = point.y - start.y;
+    alongDistance = relativeX * Math.cos(angle) + relativeY * Math.sin(angle);
+    acrossDistance = relativeY * Math.cos(angle) - relativeX * Math.sin(angle);
+  }
+
+  // The source texture is 2:1, so one repeat spans two brush diameters. Its
+  // horizontal coordinate advances continuously across flattened curve pieces.
+  const period = Math.max(textureSize * 2, 2);
+  return sampleBrushTexture(
+    texture,
+    (textureOffset + alongDistance) / period,
+    0.5 + acrossDistance / (Math.max(radius, 0.5) * 2),
+    seed,
+  );
+}
+
+function charcoalTextureCoverage(point: Point, seed: number): number {
   const broad = smoothNoise(point, seed ^ 0x1b873593, 0.09);
   const grain = smoothNoise(point, seed, 0.52);
   const tooth = spatialNoise(point, seed ^ 0x2c1b3c6d, 1.7);

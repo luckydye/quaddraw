@@ -16,7 +16,6 @@ import type {
   RasterSelection,
 } from "./types";
 
-const MINIMAP_SCALE = 0.012;
 const OVERVIEW_SCALE = 0.08;
 const CACHE_MARGIN_FACTOR = 0.2;
 const SELECTION_HIGHLIGHT_CELL_LIMIT = 20_000;
@@ -386,6 +385,13 @@ export class CanvasRenderer {
 
   private drawMinimap(camera: Camera): void {
     const { width, height } = this.minimap;
+    const scale = Math.min(
+      width / WORLD_BOUNDS.width,
+      height / WORLD_BOUNDS.height,
+    );
+    const worldLeft = (width - WORLD_BOUNDS.width * scale) / 2;
+    const worldTop = (height - WORLD_BOUNDS.height * scale) / 2;
+    const viewport = this.viewportBounds(camera);
 
     this.minimapContext.clearRect(0, 0, width, height);
     this.minimapContext.fillStyle = "#fbfbfb";
@@ -397,18 +403,18 @@ export class CanvasRenderer {
       0,
       this.overviewCanvas.width,
       this.overviewCanvas.height,
-      width / 2 + WORLD_BOUNDS.x * MINIMAP_SCALE,
-      height / 2 + WORLD_BOUNDS.y * MINIMAP_SCALE,
-      WORLD_BOUNDS.width * MINIMAP_SCALE,
-      WORLD_BOUNDS.height * MINIMAP_SCALE,
+      worldLeft,
+      worldTop,
+      WORLD_BOUNDS.width * scale,
+      WORLD_BOUNDS.height * scale,
     );
     this.minimapContext.strokeStyle = "#6466c9";
     this.minimapContext.lineWidth = 1;
     this.minimapContext.strokeRect(
-      width / 2 - camera.x * MINIMAP_SCALE,
-      height / 2 - camera.y * MINIMAP_SCALE,
-      (this.area.clientWidth * MINIMAP_SCALE) / camera.zoom,
-      (this.area.clientHeight * MINIMAP_SCALE) / camera.zoom,
+      worldLeft + (viewport.x - WORLD_BOUNDS.x) * scale,
+      worldTop + (viewport.y - WORLD_BOUNDS.y) * scale,
+      viewport.width * scale,
+      viewport.height * scale,
     );
   }
 
@@ -548,19 +554,35 @@ export class CanvasRenderer {
       else regionsByColor.set(cell.color, [cell]);
     }
 
-    // Filling each cell separately makes Canvas anti-alias every shared edge,
-    // exposing the quadtree topology as hairline gaps. A compound path is the
-    // union of all equal-color leaves, so only the outside boundary is sampled.
+    // Quadtree coverage is already raster data. Drawing its rectangles through
+    // the vector antialiaser exposes differently colored/transparent neighbors
+    // as hairline squares, especially for textured masks. Snap every shared
+    // dyadic edge to one backing-pixel coordinate and let stored alpha—not path
+    // antialiasing—describe the brush boundary.
+    const transform = context.getTransform();
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
     groups.forEach((regionsByColor) => {
       regionsByColor.forEach((regions, color) => {
         context.beginPath();
         for (const region of regions) {
-          context.rect(region.bounds.x, region.bounds.y, region.bounds.width, region.bounds.height);
+          const left = Math.round(region.bounds.x * transform.a + transform.e);
+          const top = Math.round(region.bounds.y * transform.d + transform.f);
+          const right = Math.round(
+            (region.bounds.x + region.bounds.width) * transform.a + transform.e,
+          );
+          const bottom = Math.round(
+            (region.bounds.y + region.bounds.height) * transform.d + transform.f,
+          );
+          if (right > left && bottom > top) {
+            context.rect(left, top, right - left, bottom - top);
+          }
         }
         context.fillStyle = rgbaToCss(color);
         context.fill();
       });
     });
+    context.restore();
   }
 
   private drawSelection(

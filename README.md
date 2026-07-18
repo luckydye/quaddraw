@@ -10,6 +10,11 @@ nodes. Uniform areas remain compressed as one node;
 only brush edges subdivide to pixel-sized leaves. The canvas renderer traverses
 and fills the visible colored nodes directly.
 
+Textured brushes sample a real two-dimensional opacity mask in stroke-local
+coordinates. The mask rotates with each flattened curve segment, advances by
+travelled distance, mirrors at repeat boundaries, and is unioned once per
+gesture so dense bristle overlaps do not darken themselves.
+
 Undo and redo retain copy-on-write document and tree roots, so unchanged layers
 and branches are shared. IndexedDB persistence stores ordered layer metadata,
 raster values, and full tree topology in the `QDR3` binary snapshot format.

@@ -42,7 +42,6 @@
           <div class="brush-cursor" id="brushCursor" aria-hidden="true"><span class="brush-cursor-crosshair"></span></div>
           <div class="canvas-hint" id="canvasHint"><kbd>V</kbd> select and move islands &nbsp;·&nbsp; two fingers or <kbd>Space</kbd> + drag to pan &nbsp;·&nbsp; pinch to zoom</div>
           <aside class="inspector" id="inspector">
-            <div class="control-label" id="brushColorLabel">Color</div>
             <a-color-picker
               class="brush-color-picker"
               id="brushColor"
@@ -50,21 +49,22 @@
               palette="#393b42,#f35b4c,#f6ba38,#53b66e,#4c8deb,#8855d4"
               aria-labelledby="brushColorLabel"
             ></a-color-picker>
-            <div class="control-label" id="brushPresetLabel">Brush</div>
+            <br/>
             <div class="brush-presets" role="group" aria-labelledby="brushPresetLabel">
               <button class="brush-preset selected" type="button" data-brush-preset="ink" aria-pressed="true" title="Crisp, pressure-responsive strokes">
                 <span class="brush-sample brush-sample-ink" aria-hidden="true"></span>
                 <span>Ink</span>
               </button>
-              <button class="brush-preset" type="button" data-brush-preset="marker" aria-pressed="false" title="Translucent strokes with a consistent width">
-                <span class="brush-sample brush-sample-marker" aria-hidden="true"></span>
-                <span>Marker</span>
+              <button class="brush-preset" type="button" data-brush-preset="bristle" aria-pressed="false" title="A real 2D bristle mask that follows the stroke direction">
+                <span class="brush-sample brush-sample-bristle" aria-hidden="true"></span>
+                <span>Bristle</span>
               </button>
               <button class="brush-preset" type="button" data-brush-preset="charcoal" aria-pressed="false" title="Grainy, pressure-responsive strokes">
                 <span class="brush-sample brush-sample-charcoal" aria-hidden="true"></span>
                 <span>Charcoal</span>
               </button>
             </div>
+            <br/>
             <label>Weight <div class="weight-row"><input id="weight" type="range" min="1" max="42" value="3" /><output id="weightValue">3 px</output></div></label>
             <details class="brush-settings">
               <summary>Brush settings <span id="brushSettingsValue">Ink</span></summary>
@@ -72,6 +72,7 @@
                 <label for="brushTexture">Texture</label>
                 <select id="brushTexture">
                   <option value="solid">Solid</option>
+                  <option value="bristle">Bristle mask</option>
                   <option value="charcoal">Charcoal</option>
                 </select>
                 <label>Density <div class="weight-row"><input id="density" type="range" min="1" max="100" value="100" /><output id="densityValue">100%</output></div></label>
@@ -93,7 +94,7 @@
             </section>
           </aside>
           <div class="zoom-controls"><button id="zoomOut">−</button><button id="zoomLevel">100%</button><button id="zoomIn">＋</button></div>
-          <div class="minimap"><canvas id="minimapCanvas" width="176" height="111"></canvas><span class="mini-label">OVERVIEW</span></div>
+          <div class="minimap"><canvas id="minimapCanvas" width="176" height="111"></canvas></div>
         </section>
       </section>
 

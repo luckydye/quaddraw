@@ -27,7 +27,7 @@ const ERASER_WIDTH = 28;
 
 const BRUSH_PRESETS = {
   ink: { label: "Ink", density: 100, dynamics: 100, texture: "solid" },
-  marker: { label: "Marker", density: 55, dynamics: 15, texture: "solid" },
+  bristle: { label: "Bristle", density: 100, dynamics: 75, texture: "bristle" },
   charcoal: { label: "Charcoal", density: 72, dynamics: 85, texture: "charcoal" },
 } as const satisfies Record<string, {
   label: string;
