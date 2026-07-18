@@ -20,11 +20,13 @@ const MINIMAP_SCALE = 0.012;
 const OVERVIEW_SCALE = 0.08;
 const CACHE_MARGIN_FACTOR = 0.2;
 const SELECTION_HIGHLIGHT_CELL_LIMIT = 20_000;
+const DEBUG_FLASH_DURATION_MS = 420;
 
 /** Renders colored quadtree regions without reconstructing vector paths. */
 export class CanvasRenderer {
   readonly overviewScale = OVERVIEW_SCALE;
   private readonly context: CanvasRenderingContext2D;
+  private readonly debugFlashContext: CanvasRenderingContext2D;
   private readonly overviewCanvas = document.createElement("canvas");
   private readonly overviewContext: CanvasRenderingContext2D;
   private readonly committedTreeCanvas = document.createElement("canvas");
@@ -51,20 +53,25 @@ export class CanvasRenderer {
   private pathSelectionValue: Path2D | null = null;
   private previewSelection: RasterSelection | null = null;
   private previewCamera: Camera | null = null;
+  private debugFlashAnimation: Animation | null = null;
+  private debugFlashCamera: Camera | null = null;
   private pendingWorkerRender: {
     id: number;
     camera: Camera;
     worldBounds: Bounds;
     onReady: () => void;
     onFailure: () => void;
+    debugRegions: readonly QuadDebugRegion[];
   } | null = null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
+    private readonly debugFlashCanvas: HTMLCanvasElement,
     private readonly minimap: HTMLCanvasElement,
     private readonly area: HTMLElement,
   ) {
     this.context = canvas.getContext("2d")!;
+    this.debugFlashContext = debugFlashCanvas.getContext("2d")!;
     this.overviewContext = this.overviewCanvas.getContext("2d")!;
     this.committedTreeContext = this.committedTreeCanvas.getContext("2d")!;
     this.treeContext = this.treeCanvas.getContext("2d")!;
@@ -85,6 +92,10 @@ export class CanvasRenderer {
     this.canvas.width = bounds.width * scale;
     this.canvas.height = bounds.height * scale;
     this.context.setTransform(scale, 0, 0, scale, 0, 0);
+    this.debugFlashCanvas.width = bounds.width * scale;
+    this.debugFlashCanvas.height = bounds.height * scale;
+    this.debugFlashContext.setTransform(scale, 0, 0, scale, 0, 0);
+    this.clearDebugFlash();
     this.cacheMarginX = bounds.width * CACHE_MARGIN_FACTOR;
     this.cacheMarginY = bounds.height * CACHE_MARGIN_FACTOR;
     this.cacheWidth = bounds.width + this.cacheMarginX * 2;
@@ -126,6 +137,9 @@ export class CanvasRenderer {
     selectionOffset: Point = { x: 0, y: 0 },
   ): void {
     const viewport = this.area.getBoundingClientRect();
+    if (this.debugFlashCamera && !sameCamera(camera, this.debugFlashCamera)) {
+      this.clearDebugFlash();
+    }
     if (redrawTree) {
       this.previewSelection = null;
       this.previewCamera = null;
@@ -140,6 +154,8 @@ export class CanvasRenderer {
       this.committedTreeContext.restore();
       this.committedCamera = { ...camera };
       this.committedWorldBounds = renderedWorldBounds ?? this.renderBounds(camera);
+      if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
+      else this.clearDebugFlash();
     }
 
     this.treeContext.clearRect(0, 0, viewport.width, viewport.height);
@@ -190,6 +206,7 @@ export class CanvasRenderer {
     this.drawCells(cells, this.committedTreeContext);
     this.drawDebugRegions(debugRegions, this.committedTreeContext, this.committedCamera.zoom);
     this.committedTreeContext.restore();
+    if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
 
     this.render(camera, [], [], false, this.committedWorldBounds);
     return true;
@@ -227,6 +244,7 @@ export class CanvasRenderer {
       camera: { ...camera },
       worldBounds: { ...renderedWorldBounds },
       onReady,
+      debugRegions,
       onFailure: () => {
         this.render(camera, cells, debugRegions, true, renderedWorldBounds);
         onReady();
@@ -357,6 +375,11 @@ export class CanvasRenderer {
         this.committedCamera = pending.camera;
         this.committedWorldBounds = pending.worldBounds;
         this.pendingWorkerRender = null;
+        if (pending.debugRegions.length > 0) {
+          this.flashDebugRegions(pending.camera, pending.debugRegions);
+        } else {
+          this.clearDebugFlash();
+        }
         pending.onReady();
       });
       worker.addEventListener("error", () => {
@@ -548,6 +571,51 @@ export class CanvasRenderer {
     context.restore();
   }
 
+  private flashDebugRegions(camera: Camera, regions: readonly QuadDebugRegion[]): void {
+    if (!sameCamera(camera, this.debugFlashCamera)) {
+      this.debugFlashContext.clearRect(0, 0, this.area.clientWidth, this.area.clientHeight);
+    }
+    this.debugFlashCamera = { ...camera };
+    this.debugFlashContext.save();
+    this.debugFlashContext.translate(camera.x, camera.y);
+    this.debugFlashContext.scale(camera.zoom, camera.zoom);
+    this.debugFlashContext.beginPath();
+    for (const region of regions) {
+      this.debugFlashContext.rect(
+        region.bounds.x,
+        region.bounds.y,
+        region.bounds.width,
+        region.bounds.height,
+      );
+    }
+    this.debugFlashContext.fillStyle = "rgb(255 214 51 / 0.3)";
+    this.debugFlashContext.strokeStyle = "rgb(255 255 255 / 0.92)";
+    this.debugFlashContext.lineWidth = 1.5 / camera.zoom;
+    this.debugFlashContext.fill();
+    this.debugFlashContext.stroke();
+    this.debugFlashContext.restore();
+
+    this.debugFlashAnimation?.cancel();
+    const animation = this.debugFlashCanvas.animate(
+      [{ opacity: 0.9 }, { opacity: 0 }],
+      { duration: DEBUG_FLASH_DURATION_MS, easing: "cubic-bezier(.2, .8, .2, 1)" },
+    );
+    this.debugFlashAnimation = animation;
+    animation.addEventListener("finish", () => {
+      if (this.debugFlashAnimation !== animation) return;
+      this.debugFlashAnimation = null;
+      this.debugFlashCamera = null;
+      this.debugFlashContext.clearRect(0, 0, this.area.clientWidth, this.area.clientHeight);
+    }, { once: true });
+  }
+
+  private clearDebugFlash(): void {
+    this.debugFlashAnimation?.cancel();
+    this.debugFlashAnimation = null;
+    this.debugFlashCamera = null;
+    this.debugFlashContext.clearRect(0, 0, this.area.clientWidth, this.area.clientHeight);
+  }
+
   private drawTreeForCamera(viewport: DOMRect, camera: Camera): void {
     this.drawOverviewForCamera(camera);
 
@@ -638,6 +706,13 @@ export class CanvasRenderer {
     context.lineTo(toX, toY);
     context.stroke();
   }
+}
+
+function sameCamera(left: Camera, right: Camera | null): boolean {
+  return right !== null
+    && left.x === right.x
+    && left.y === right.y
+    && left.zoom === right.zoom;
 }
 
 function packCells(cells: readonly RasterCell[]): ArrayBuffer {

@@ -45,6 +45,7 @@ if (!customElements.get("a-color-picker")) {
 const elements = {
   area: requiredElement<HTMLElement>("#canvasArea"),
   canvas: requiredElement<HTMLCanvasElement>("#drawingCanvas"),
+  debugFlashCanvas: requiredElement<HTMLCanvasElement>("#debugFlashCanvas"),
   brushCursor: requiredElement<HTMLElement>("#brushCursor"),
   brushColor: requiredElement<ColorPickerElement>("#brushColor"),
   minimap: requiredElement<HTMLCanvasElement>("#minimapCanvas"),
@@ -76,7 +77,12 @@ const elements = {
 };
 
 const store = new DrawingStore();
-const renderer = new CanvasRenderer(elements.canvas, elements.minimap, elements.area);
+const renderer = new CanvasRenderer(
+  elements.canvas,
+  elements.debugFlashCanvas,
+  elements.minimap,
+  elements.area,
+);
 
 let camera: Camera = { x: 0, y: 0, zoom: 1 };
 let activeTool: Tool = "pen";
