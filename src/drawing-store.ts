@@ -16,17 +16,19 @@ type DrawingState = {
   strokeCount: number;
 };
 
-const SLOW_WIDTH_FACTOR = 1.55;
-const FAST_WIDTH_FACTOR = 0.55;
+const SLOW_WIDTH_FACTOR = 1.8;
+const FAST_WIDTH_FACTOR = 0.35;
 const MAX_WIDTH_VELOCITY = 0.9;
+const LIGHT_PRESSURE_WIDTH_FACTOR = 0.2;
+const HEAVY_PRESSURE_WIDTH_FACTOR = 1.8;
 const INITIAL_VELOCITY_DISTANCE = 10;
 const MINIMUM_POINT_DISTANCE = 0.35;
-const WIDTH_GROWTH_DISTANCE = 14;
-const WIDTH_SHRINK_DISTANCE = 4;
+const WIDTH_GROWTH_DISTANCE = 28;
+const WIDTH_SHRINK_DISTANCE = 28;
 const CURVE_FLATNESS = 0.2;
 const MAX_CURVE_DEPTH = 8;
 const PRESSURE_SAMPLE_DELTA = 0.015;
-const PRESSURE_RESPONSE_DELTA = 0.12;
+const PRESSURE_RESPONSE_DELTA = 0.5;
 
 /** Owns brush transactions, history, and the sparse raster quadtree. */
 export class DrawingStore {
@@ -556,7 +558,11 @@ function dynamicsAdjustedWidth(
 ): number {
   const pressureFactor = pressure === undefined
     ? 1
-    : 0.3 + Math.max(0, Math.min(1, pressure)) * 1.2;
+    : interpolate(
+      LIGHT_PRESSURE_WIDTH_FACTOR,
+      HEAVY_PRESSURE_WIDTH_FACTOR,
+      Math.max(0, Math.min(1, pressure)),
+    );
   return interpolate(baseWidth, velocityWidth * pressureFactor, dynamics);
 }
 

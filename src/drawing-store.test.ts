@@ -45,6 +45,19 @@ describe("DrawingStore velocity initialization", () => {
 
     expect(action.points[action.points.length - 1].strength!).toBeLessThan(action.width);
   });
+
+  test("smooths a sudden velocity change across multiple samples", () => {
+    const store = new DrawingStore();
+    const action = store.createStroke({ x: 0, y: 0, time: 0 }, "#393b42", 10);
+    store.appendPoint(action, { x: 20, y: 0, time: 10 });
+    const fastWidth = action.points[action.points.length - 1].strength!;
+
+    store.appendPoint(action, { x: 22, y: 0, time: 110 });
+    const firstSlowWidth = action.points[action.points.length - 1].strength!;
+
+    expect(firstSlowWidth).toBeGreaterThan(fastWidth);
+    expect(firstSlowWidth - fastWidth).toBeLessThan(action.width * 0.12);
+  });
 });
 
 describe("DrawingStore brush density", () => {
@@ -95,6 +108,26 @@ describe("DrawingStore stylus pressure", () => {
 
     expect(action.dynamics).toBe(0);
     expect(action.points.every((point) => point.strength === action.width)).toBe(true);
+  });
+
+  test("full dynamics produces a pronounced thickness range", () => {
+    const store = new DrawingStore();
+    const heavySlowStroke = store.createStroke(
+      { x: 0, y: 0, time: 0, pressure: 1 },
+      "#393b42",
+      10,
+    );
+    store.appendPoint(heavySlowStroke, { x: 20, y: 0, time: 100, pressure: 1 });
+
+    const lightFastStroke = store.createStroke(
+      { x: 0, y: 20, time: 0, pressure: 0 },
+      "#393b42",
+      10,
+    );
+    store.appendPoint(lightFastStroke, { x: 20, y: 20, time: 10, pressure: 0 });
+
+    expect(heavySlowStroke.points[0].strength!).toBeGreaterThan(25);
+    expect(lightFastStroke.points[0].strength!).toBeLessThan(1);
   });
 });
 
