@@ -162,3 +162,60 @@ describe("DrawingStore selection movement", () => {
     }
   });
 });
+
+describe("DrawingStore layers", () => {
+  test("edits only the active layer and composites visible layers bottom to top", () => {
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { requestIdleCallback: () => 0 },
+    });
+
+    try {
+      const store = new DrawingStore();
+      const bottomStroke = store.createStroke({ x: 0, y: 0 }, "#f35b4c", 10);
+      store.commit(bottomStroke);
+      const bottomLayerId = store.activeLayerId;
+      const topLayerId = store.addLayer("Highlights");
+      const topStroke = store.createStroke({ x: 0, y: 0 }, "#4c8deb", 10);
+      store.commit(topStroke);
+
+      expect(store.layers.map(({ id }) => id)).toEqual([bottomLayerId, topLayerId]);
+      expect([...new Set(store.visibleIn(WORLD_BOUNDS).map(({ renderGroup }) => renderGroup))])
+        .toEqual([bottomLayerId, topLayerId]);
+
+      const eraser = store.createEraser({ x: 0, y: 0 }, 20);
+      store.commit(eraser);
+      expect([...new Set(
+        store.visibleIn(WORLD_BOUNDS).map(({ renderGroup }) => renderGroup),
+      )]).toEqual([bottomLayerId]);
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("makes layer properties and structure undoable", () => {
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { requestIdleCallback: () => 0 },
+    });
+
+    try {
+      const store = new DrawingStore();
+      const layerId = store.addLayer("Paint");
+      expect(store.setLayerOpacity(layerId, 0.4)).toBe(true);
+      expect(store.layers.find(({ id }) => id === layerId)?.opacity).toBe(0.4);
+      expect(store.undo()).toBe(true);
+      expect(store.layers.find(({ id }) => id === layerId)?.opacity).toBe(1);
+      expect(store.undo()).toBe(true);
+      expect(store.layers).toHaveLength(1);
+      expect(store.redo()).toBe(true);
+      expect(store.layers.map(({ name }) => name)).toEqual(["Layer 1", "Paint"]);
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+});

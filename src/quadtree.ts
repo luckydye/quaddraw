@@ -272,6 +272,11 @@ export class RasterQuadTree {
     };
   }
 
+  /** World-space bounds of all non-transparent leaves. */
+  occupiedBounds(): Bounds | null {
+    return occupiedBounds(this.root, this.bounds);
+  }
+
   snapshot(): QuadNode {
     return this.root;
   }

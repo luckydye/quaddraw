@@ -36,6 +36,14 @@ const elements = {
   dynamics: requiredElement<HTMLInputElement>("#dynamics"),
   dynamicsValue: requiredElement<HTMLOutputElement>("#dynamicsValue"),
   brushTexture: requiredElement<HTMLSelectElement>("#brushTexture"),
+  inspector: requiredElement<HTMLElement>("#inspector"),
+  layerList: requiredElement<HTMLElement>("#layerList"),
+  layerOpacity: requiredElement<HTMLInputElement>("#layerOpacity"),
+  layerOpacityValue: requiredElement<HTMLOutputElement>("#layerOpacityValue"),
+  layerMoveUp: requiredElement<HTMLButtonElement>("#layerMoveUp"),
+  layerMoveDown: requiredElement<HTMLButtonElement>("#layerMoveDown"),
+  addLayer: requiredElement<HTMLButtonElement>("#addLayer"),
+  removeLayer: requiredElement<HTMLButtonElement>("#removeLayer"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
   debugTree: requiredElement<HTMLButtonElement>("#debugTree"),
   toast: requiredElement<HTMLElement>("#toast"),
@@ -281,6 +289,104 @@ function showToast(message: string): void {
   window.setTimeout(() => elements.toast.classList.remove("show"), 1_800);
 }
 
+function renderLayerPanel(): void {
+  const layers = [...store.layers];
+  const activeIndex = layers.findIndex(({ id }) => id === store.activeLayerId);
+  const activeLayer = layers[activeIndex];
+  const rows = [...layers].reverse().map((layer) => {
+    const row = document.createElement("div");
+    row.className = "layer-row";
+    row.classList.toggle("active", layer.id === store.activeLayerId);
+    row.dataset.layerId = String(layer.id);
+    row.tabIndex = 0;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(layer.id === store.activeLayerId));
+    row.addEventListener("click", () => activateLayer(layer.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      activateLayer(layer.id);
+    });
+
+    const visibility = document.createElement("button");
+    visibility.type = "button";
+    visibility.className = "layer-visibility";
+    visibility.classList.toggle("is-hidden", !layer.visible);
+    visibility.textContent = layer.visible ? "●" : "○";
+    visibility.title = layer.visible ? "Hide layer" : "Show layer";
+    visibility.setAttribute("aria-label", `${layer.visible ? "Hide" : "Show"} ${layer.name}`);
+    visibility.setAttribute("aria-pressed", String(layer.visible));
+    visibility.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!store.setLayerVisibility(layer.id, !layer.visible)) return;
+      selection = null;
+      render();
+      renderLayerPanel();
+    });
+
+    const thumbnail = document.createElement("span");
+    thumbnail.className = "layer-thumbnail";
+    thumbnail.setAttribute("aria-hidden", "true");
+
+    const name = document.createElement("input");
+    name.className = "layer-name";
+    name.value = layer.name;
+    name.spellcheck = false;
+    name.setAttribute("aria-label", `Layer name: ${layer.name}`);
+    name.addEventListener("click", (event) => event.stopPropagation());
+    name.addEventListener("focus", () => {
+      if (layer.id !== store.activeLayerId) activateLayer(layer.id, true);
+    });
+    name.addEventListener("change", () => {
+      store.renameLayer(layer.id, name.value);
+      renderLayerPanel();
+    });
+    name.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") name.blur();
+      if (event.key === "Escape") {
+        name.value = layer.name;
+        name.blur();
+      }
+    });
+
+    row.append(visibility, thumbnail, name);
+    return row;
+  });
+  elements.layerList.replaceChildren(...rows);
+
+  const opacity = activeLayer ? Math.round(activeLayer.opacity * 100) : 100;
+  elements.layerOpacity.value = String(opacity);
+  elements.layerOpacityValue.value = `${opacity}%`;
+  elements.layerMoveUp.disabled = activeIndex < 0 || activeIndex === layers.length - 1;
+  elements.layerMoveDown.disabled = activeIndex <= 0;
+  elements.removeLayer.disabled = layers.length <= 1;
+}
+
+function activateLayer(layerId: number, focusName = false): void {
+  const changed = store.setActiveLayer(layerId);
+  if (changed) {
+    selection = null;
+    render(debugQuadtree, false);
+    renderLayerPanel();
+  }
+  if (focusName) {
+    queueMicrotask(() => {
+      const input = elements.layerList.querySelector<HTMLInputElement>(
+        `.layer-row[data-layer-id="${layerId}"] .layer-name`,
+      );
+      input?.focus();
+      input?.select();
+    });
+  }
+}
+
+function renderAfterLayerChange(message?: string): void {
+  selection = null;
+  render();
+  renderLayerPanel();
+  if (message) showToast(message);
+}
+
 function bindCanvasEvents(): void {
   elements.canvas.addEventListener("pointerdown", (event) => {
     elements.canvas.setPointerCapture(event.pointerId);
@@ -380,6 +486,7 @@ function bindControls(): void {
   });
 
   elements.debugTree.addEventListener("click", toggleQuadtreeDebug);
+  elements.inspector.addEventListener("wheel", (event) => event.stopPropagation());
 
   elements.weight.addEventListener("input", () => {
     elements.weightValue.textContent = `${elements.weight.value} px`;
@@ -391,6 +498,41 @@ function bindControls(): void {
 
   elements.dynamics.addEventListener("input", () => {
     elements.dynamicsValue.textContent = `${elements.dynamics.value}%`;
+  });
+
+  elements.layerOpacity.addEventListener("input", () => {
+    elements.layerOpacityValue.value = `${elements.layerOpacity.value}%`;
+  });
+  elements.layerOpacity.addEventListener("change", () => {
+    if (store.setLayerOpacity(store.activeLayerId, Number(elements.layerOpacity.value) / 100)) {
+      renderAfterLayerChange();
+    }
+  });
+
+  elements.addLayer.addEventListener("click", () => {
+    const layerId = store.addLayer();
+    renderAfterLayerChange("Layer added");
+    queueMicrotask(() => {
+      const input = elements.layerList.querySelector<HTMLInputElement>(
+        `.layer-row[data-layer-id="${layerId}"] .layer-name`,
+      );
+      input?.focus();
+      input?.select();
+    });
+  });
+
+  elements.removeLayer.addEventListener("click", () => {
+    if (store.removeLayer(store.activeLayerId)) renderAfterLayerChange("Layer deleted");
+  });
+
+  elements.layerMoveUp.addEventListener("click", () => {
+    const index = store.layers.findIndex(({ id }) => id === store.activeLayerId);
+    if (store.moveLayer(store.activeLayerId, index + 1)) renderAfterLayerChange();
+  });
+
+  elements.layerMoveDown.addEventListener("click", () => {
+    const index = store.layers.findIndex(({ id }) => id === store.activeLayerId);
+    if (store.moveLayer(store.activeLayerId, index - 1)) renderAfterLayerChange();
   });
 
   document.querySelectorAll<HTMLButtonElement>("#swatches button").forEach((button) => {
@@ -413,6 +555,7 @@ function bindControls(): void {
     if (store.undo()) {
       selection = null;
       render();
+      renderLayerPanel();
     }
   });
 
@@ -420,6 +563,7 @@ function bindControls(): void {
     if (store.redo()) {
       selection = null;
       render();
+      renderLayerPanel();
     }
   });
 
@@ -442,6 +586,7 @@ function bindControls(): void {
 
 function bindKeyboardShortcuts(): void {
   window.addEventListener("keydown", (event) => {
+    if (isEditableControl(event.target)) return;
     if (event.code === "Space") {
       isSpacePressed = true;
       elements.area.classList.add("is-panning");
@@ -469,6 +614,7 @@ function bindKeyboardShortcuts(): void {
       if (event.shiftKey ? store.redo() : store.undo()) {
         selection = null;
         render();
+        renderLayerPanel();
       }
     }
   });
@@ -483,12 +629,18 @@ function bindKeyboardShortcuts(): void {
   });
 }
 
+function isEditableControl(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement
+    && target.closest("#inspector, input, textarea, select, button, [contenteditable='true']") !== null;
+}
+
 async function initialize(): Promise<void> {
   await store.restore();
   store.subscribeSnapshotSize(updateStatus);
   bindCanvasEvents();
   bindControls();
   bindKeyboardShortcuts();
+  renderLayerPanel();
   new ResizeObserver(() => {
     renderer.resize();
     render();

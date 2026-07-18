@@ -19,5 +19,5 @@ export type WorkerRenderResult = {
   bitmap: ImageBitmap;
 };
 
-export const PACKED_CELL_BYTES = 20;
+export const PACKED_CELL_BYTES = 24;
 export const PACKED_DEBUG_REGION_FLOATS = 6;

@@ -53,6 +53,19 @@
             <label>Weight <div class="weight-row"><input id="weight" type="range" min="1" max="42" value="3" /><output id="weightValue">3 px</output></div></label>
             <label>Density <div class="weight-row"><input id="density" type="range" min="1" max="100" value="100" /><output id="densityValue">100%</output></div></label>
             <label>Dynamics <div class="weight-row"><input id="dynamics" type="range" min="0" max="100" value="100" title="How much velocity and stylus pressure affect stroke thickness" /><output id="dynamicsValue">100%</output></div></label>
+            <section class="layers-panel" aria-labelledby="layersHeading">
+              <div class="layers-header">
+                <span id="layersHeading">LAYERS</span>
+                <div class="layer-actions">
+                  <button id="layerMoveUp" type="button" title="Move layer up" aria-label="Move active layer up">↑</button>
+                  <button id="layerMoveDown" type="button" title="Move layer down" aria-label="Move active layer down">↓</button>
+                  <button id="addLayer" type="button" title="Add layer" aria-label="Add layer">＋</button>
+                  <button id="removeLayer" type="button" title="Delete layer" aria-label="Delete active layer">×</button>
+                </div>
+              </div>
+              <div class="layer-list" id="layerList" role="listbox" aria-label="Drawing layers"></div>
+              <label class="layer-opacity" for="layerOpacity">Opacity <div class="weight-row"><input id="layerOpacity" type="range" min="0" max="100" value="100" /><output id="layerOpacityValue">100%</output></div></label>
+            </section>
           </aside>
           <div class="zoom-controls"><button id="zoomOut">−</button><button id="zoomLevel">100%</button><button id="zoomIn">＋</button></div>
           <div class="minimap"><canvas id="minimapCanvas" width="176" height="111"></canvas><span class="mini-label">OVERVIEW</span></div>
@@ -61,7 +74,7 @@
 
       <footer class="statusbar">
         <div class="status-left">
-          <span><span class="tree-dot"></span> Raster quadtree · <span id="strokeCount">0</span> strokes · <span id="nodeCount">1</span> node · effective <span id="occupiedResolution" title="Max-depth raster resolution covering the bounds of all non-transparent quads">0 × 0 px</span> · snapshot <span id="snapshotCompressedSize" title="Gzip-compressed IndexedDB snapshot payload">0 B</span> compressed / <span id="snapshotUncompressedSize" title="Uncompressed QDR2 binary snapshot payload">0 B</span> raw</span>
+          <span><span class="tree-dot"></span> Raster quadtree · <span id="strokeCount">0</span> strokes · <span id="nodeCount">1</span> node · effective <span id="occupiedResolution" title="Max-depth raster resolution covering the bounds of all non-transparent quads">0 × 0 px</span> · snapshot <span id="snapshotCompressedSize" title="Gzip-compressed IndexedDB snapshot payload">0 B</span> compressed / <span id="snapshotUncompressedSize" title="Uncompressed QDR3 binary snapshot payload">0 B</span> raw</span>
         </div>
         <div class="status-right"><button id="exportButton">Export</button><button id="clearButton" class="clear">Clear canvas</button></div>
       </footer>

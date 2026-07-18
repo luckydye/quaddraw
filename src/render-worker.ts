@@ -8,7 +8,7 @@ export function createRenderWorker(): Worker {
 }
 
 function renderWorkerMain(): void {
-  const packedCellBytes = 20;
+  const packedCellBytes = 24;
   const packedDebugRegionFloats = 6;
   const canvas = new OffscreenCanvas(1, 1);
   const context = canvas.getContext("2d")!;
@@ -67,28 +67,36 @@ function renderWorkerMain(): void {
 
   function drawCells(buffer: ArrayBuffer): void {
     const view = new DataView(buffer);
-    const regionsByColor = new Map<number, number[]>();
+    const groups = new Map<number, Map<number, number[]>>();
     const count = buffer.byteLength / packedCellBytes;
     for (let index = 0; index < count; index++) {
       const offset = index * packedCellBytes;
       const color = view.getUint32(offset + 16, true);
+      const group = view.getUint32(offset + 20, true);
+      let regionsByColor = groups.get(group);
+      if (!regionsByColor) {
+        regionsByColor = new Map();
+        groups.set(group, regionsByColor);
+      }
       const regions = regionsByColor.get(color);
       if (regions) regions.push(offset);
       else regionsByColor.set(color, [offset]);
     }
 
-    regionsByColor.forEach((regions, color) => {
-      context.beginPath();
-      for (const offset of regions) {
-        context.rect(
-          view.getFloat32(offset, true),
-          view.getFloat32(offset + 4, true),
-          view.getFloat32(offset + 8, true),
-          view.getFloat32(offset + 12, true),
-        );
-      }
-      context.fillStyle = rgbaToCss(color);
-      context.fill();
+    groups.forEach((regionsByColor) => {
+      regionsByColor.forEach((regions, color) => {
+        context.beginPath();
+        for (const offset of regions) {
+          context.rect(
+            view.getFloat32(offset, true),
+            view.getFloat32(offset + 4, true),
+            view.getFloat32(offset + 8, true),
+            view.getFloat32(offset + 12, true),
+          );
+        }
+        context.fillStyle = rgbaToCss(color);
+        context.fill();
+      });
     });
   }
 

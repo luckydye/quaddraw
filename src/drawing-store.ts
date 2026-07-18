@@ -1,5 +1,14 @@
 import { RasterQuadTree } from "./quadtree";
-import { loadQuadTree, saveQuadTree, type SnapshotSizes } from "./quadtree-storage";
+import {
+  activeLayer,
+  createDrawingDocument,
+  replaceLayer,
+  type DrawingDocument,
+  type DrawingLayer,
+  type LayerId,
+  type LayerInfo,
+} from "./drawing-document";
+import { loadDrawing, saveDrawing, type SnapshotSizes } from "./quadtree-storage";
 import type {
   Bounds,
   BrushAction,
@@ -12,8 +21,7 @@ import type {
 import { WORLD_BOUNDS } from "./types";
 
 type DrawingState = {
-  tree: RasterQuadTree;
-  strokeCount: number;
+  document: DrawingDocument;
 };
 
 const SLOW_WIDTH_FACTOR = 1.8;
@@ -30,14 +38,14 @@ const MAX_CURVE_DEPTH = 8;
 const PRESSURE_SAMPLE_DELTA = 0.015;
 const PRESSURE_RESPONSE_DELTA = 0.5;
 
-/** Owns brush transactions, history, and the sparse raster quadtree. */
+/** Owns layer edits, brush transactions, history, and sparse raster trees. */
 export class DrawingStore {
-  private tree = new RasterQuadTree(WORLD_BOUNDS);
-  private committedStrokeCount = 0;
+  private document = createDrawingDocument();
   private undoStack: DrawingState[] = [];
   private redoStack: DrawingState[] = [];
   private actionStart: DrawingState | null = null;
   private actionMask: RasterQuadTree | null = null;
+  private actionLayerId: LayerId | null = null;
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
@@ -47,10 +55,9 @@ export class DrawingStore {
   private readonly snapshotSizeListeners = new Set<() => void>();
 
   async restore(): Promise<void> {
-    const restored = await loadQuadTree();
+    const restored = await loadDrawing();
     if (!restored) return;
-    this.tree = restored.tree;
-    this.committedStrokeCount = restored.strokeCount;
+    this.document = restored.document;
     this.updateOccupiedResolution();
     this.setSnapshotSizes(restored.snapshotSizes);
     if (restored.needsUpgrade) this.persist();
@@ -138,16 +145,23 @@ export class DrawingStore {
     if (action.kind === "stroke" && action.points.length > 1) {
       this.paintReadyStrokeSegments(action, true);
     }
-    if (this.tree === this.actionStart.tree) {
+    if (this.document === this.actionStart.document) {
       this.actionStart = null;
       this.actionMask = null;
+      this.actionLayerId = null;
       return;
+    }
+    if (action.kind === "stroke") {
+      this.document = replaceLayer(this.document, this.actionLayerId!, (layer) => ({
+        ...layer,
+        strokeCount: layer.strokeCount + 1,
+      }));
     }
     this.undoStack.push(this.actionStart);
     this.redoStack = [];
     this.actionStart = null;
     this.actionMask = null;
-    if (action.kind === "stroke") this.committedStrokeCount += 1;
+    this.actionLayerId = null;
     this.updateOccupiedResolution();
     this.persist();
   }
@@ -171,23 +185,30 @@ export class DrawingStore {
   }
 
   clear(): void {
-    if (this.committedStrokeCount === 0 && this.tree.countNodes() === 1) return;
+    if (this.strokeCount === 0 && this.nodeCount === this.document.layers.length) return;
     this.undoStack.push(this.currentState());
     this.redoStack = [];
-    this.tree = new RasterQuadTree(WORLD_BOUNDS);
-    this.committedStrokeCount = 0;
+    this.document = {
+      ...this.document,
+      layers: this.document.layers.map((layer) => ({
+        ...layer,
+        tree: new RasterQuadTree(WORLD_BOUNDS),
+        strokeCount: 0,
+      })),
+    };
     this.actionStart = null;
     this.actionMask = null;
+    this.actionLayerId = null;
     this.updateOccupiedResolution();
     this.persist();
   }
 
   visibleIn(bounds: Bounds, scale = 1): RasterCell[] {
-    return this.tree.cellsForRendering(bounds, scale);
+    return this.document.layers.flatMap((layer) => cellsForLayer(layer, bounds, scale));
   }
 
   allCells(scale = 1): RasterCell[] {
-    return this.tree.cellsForRendering(WORLD_BOUNDS, scale);
+    return this.document.layers.flatMap((layer) => cellsForLayer(layer, WORLD_BOUNDS, scale));
   }
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
@@ -222,16 +243,105 @@ export class DrawingStore {
     return moved.selection;
   }
 
+  /** Adds a new topmost layer and makes it active. */
+  addLayer(name = `Layer ${this.document.nextLayerId}`): LayerId {
+    this.assertNoActiveAction();
+    const id = this.document.nextLayerId;
+    const layer: DrawingLayer = {
+      id,
+      name,
+      visible: true,
+      opacity: 1,
+      tree: new RasterQuadTree(WORLD_BOUNDS),
+      strokeCount: 0,
+    };
+    this.commitDocumentChange({
+      layers: [...this.document.layers, layer],
+      activeLayerId: id,
+      nextLayerId: id + 1,
+    });
+    return id;
+  }
+
+  /** Selects the layer that receives drawing, erasing, and selection edits. */
+  setActiveLayer(layerId: LayerId): boolean {
+    this.assertNoActiveAction();
+    if (layerId === this.document.activeLayerId) return false;
+    if (!this.document.layers.some(({ id }) => id === layerId)) return false;
+    this.document = { ...this.document, activeLayerId: layerId };
+    this.persistImmediately();
+    return true;
+  }
+
+  renameLayer(layerId: LayerId, name: string): boolean {
+    const normalized = name.trim();
+    if (!normalized) return false;
+    return this.updateLayer(layerId, (layer) => (
+      layer.name === normalized ? layer : { ...layer, name: normalized }
+    ));
+  }
+
+  setLayerVisibility(layerId: LayerId, visible: boolean): boolean {
+    return this.updateLayer(layerId, (layer) => (
+      layer.visible === visible ? layer : { ...layer, visible }
+    ));
+  }
+
+  setLayerOpacity(layerId: LayerId, opacity: number): boolean {
+    if (!Number.isFinite(opacity)) return false;
+    const normalized = Math.max(0, Math.min(1, opacity));
+    return this.updateLayer(layerId, (layer) => (
+      layer.opacity === normalized ? layer : { ...layer, opacity: normalized }
+    ));
+  }
+
+  /** Moves a layer to a bottom-to-top array index. */
+  moveLayer(layerId: LayerId, index: number): boolean {
+    this.assertNoActiveAction();
+    if (!Number.isFinite(index)) return false;
+    const currentIndex = this.document.layers.findIndex(({ id }) => id === layerId);
+    if (currentIndex < 0) return false;
+    const nextIndex = Math.max(0, Math.min(this.document.layers.length - 1, Math.trunc(index)));
+    if (currentIndex === nextIndex) return false;
+    const layers = [...this.document.layers];
+    const [layer] = layers.splice(currentIndex, 1);
+    layers.splice(nextIndex, 0, layer);
+    this.commitDocumentChange({ ...this.document, layers });
+    return true;
+  }
+
+  /** Removes a layer while guaranteeing that every document retains one layer. */
+  removeLayer(layerId: LayerId): boolean {
+    this.assertNoActiveAction();
+    if (this.document.layers.length === 1) return false;
+    const index = this.document.layers.findIndex(({ id }) => id === layerId);
+    if (index < 0) return false;
+    const layers = this.document.layers.filter(({ id }) => id !== layerId);
+    const activeLayerId = this.document.activeLayerId === layerId
+      ? layers[Math.min(index, layers.length - 1)].id
+      : this.document.activeLayerId;
+    this.commitDocumentChange({ ...this.document, layers, activeLayerId });
+    return true;
+  }
+
   debugLeavesIn(bounds: Bounds, scale = 1): QuadDebugRegion[] {
     return this.tree.debugLeavesIn(bounds, scale);
   }
 
   get strokeCount(): number {
-    return this.committedStrokeCount;
+    return this.document.layers.reduce((count, layer) => count + layer.strokeCount, 0);
   }
 
   get nodeCount(): number {
-    return this.tree.countNodes();
+    return this.document.layers.reduce((count, layer) => count + layer.tree.countNodes(), 0);
+  }
+
+  get layers(): readonly LayerInfo[] {
+    return this.document.layers.map(({ tree: _tree, ...info }) => info);
+  }
+
+  get activeLayerId(): LayerId {
+    return this.document.activeLayerId;
   }
 
   get occupiedResolution(): Readonly<{ width: number; height: number }> {
@@ -260,6 +370,7 @@ export class DrawingStore {
     if (!this.actionStart) {
       this.actionStart = this.currentState();
       this.actionMask = new RasterQuadTree(WORLD_BOUNDS);
+      this.actionLayerId = this.document.activeLayerId;
     }
     const action: BrushAction = {
       kind,
@@ -304,12 +415,17 @@ export class DrawingStore {
   }
 
   private applyActionMask(action: BrushAction): void {
-    if (!this.actionStart || !this.actionMask) return;
-    this.tree = this.actionStart.tree.applyMask(
+    if (!this.actionStart || !this.actionMask || this.actionLayerId === null) return;
+    const baseLayer = this.actionStart.document.layers.find(({ id }) => id === this.actionLayerId);
+    if (!baseLayer) return;
+    const tree = baseLayer.tree.applyMask(
       this.actionMask,
       action.color,
       action.kind === "eraser",
     );
+    this.document = replaceLayer(this.actionStart.document, this.actionLayerId, (layer) => (
+      tree === layer.tree ? layer : { ...layer, tree }
+    ));
   }
 
   private paintBufferedStrokeStart(action: BrushAction): void {
@@ -395,19 +511,35 @@ export class DrawingStore {
   }
 
   private currentState(): DrawingState {
-    return { tree: this.tree, strokeCount: this.committedStrokeCount };
+    return { document: this.document };
   }
 
   private restoreState(state: DrawingState): void {
-    this.tree = state.tree;
-    this.committedStrokeCount = state.strokeCount;
+    this.document = state.document;
     this.actionStart = null;
     this.actionMask = null;
+    this.actionLayerId = null;
     this.updateOccupiedResolution();
   }
 
   private updateOccupiedResolution(): void {
-    this.occupiedResolutionValue = this.tree.occupiedResolution();
+    const occupied = this.document.layers
+      .filter(({ visible, opacity }) => visible && opacity > 0)
+      .map(({ tree }) => tree.occupiedBounds())
+      .filter((bounds): bounds is Bounds => bounds !== null);
+    if (occupied.length === 0) {
+      this.occupiedResolutionValue = { width: 0, height: 0 };
+      return;
+    }
+    const minimumX = Math.min(...occupied.map(({ x }) => x));
+    const minimumY = Math.min(...occupied.map(({ y }) => y));
+    const maximumX = Math.max(...occupied.map(({ x, width }) => x + width));
+    const maximumY = Math.max(...occupied.map(({ y, height }) => y + height));
+    const maximumResolution = 2 ** 15;
+    this.occupiedResolutionValue = {
+      width: Math.round((maximumX - minimumX) / WORLD_BOUNDS.width * maximumResolution),
+      height: Math.round((maximumY - minimumY) / WORLD_BOUNDS.height * maximumResolution),
+    };
   }
 
   private queueOccupiedResolutionUpdate(): void {
@@ -437,10 +569,14 @@ export class DrawingStore {
 
   private async flushPersistence(): Promise<void> {
     this.persistenceQueued = false;
+    // An immediate metadata save may overtake an already queued idle callback.
+    // The active writer will observe persistencePending and serialize the latest
+    // immutable document after its current snapshot finishes.
+    if (this.persistenceWriting) return;
     this.persistenceWriting = true;
     while (this.persistencePending) {
       this.persistencePending = false;
-      const snapshotSizes = await saveQuadTree(this.tree, this.committedStrokeCount);
+      const snapshotSizes = await saveDrawing(this.document);
       if (snapshotSizes !== null) this.setSnapshotSizes(snapshotSizes);
     }
     this.persistenceWriting = false;
@@ -449,6 +585,47 @@ export class DrawingStore {
   private setSnapshotSizes(sizes: SnapshotSizes): void {
     this.persistedSnapshotSizes = sizes;
     this.snapshotSizeListeners.forEach((listener) => listener());
+  }
+
+  private get tree(): RasterQuadTree {
+    return activeLayer(this.document).tree;
+  }
+
+  private set tree(tree: RasterQuadTree) {
+    this.document = replaceLayer(this.document, this.document.activeLayerId, (layer) => (
+      tree === layer.tree ? layer : { ...layer, tree }
+    ));
+  }
+
+  private updateLayer(
+    layerId: LayerId,
+    update: (layer: DrawingLayer) => DrawingLayer,
+  ): boolean {
+    this.assertNoActiveAction();
+    if (!this.document.layers.some(({ id }) => id === layerId)) return false;
+    const next = replaceLayer(this.document, layerId, update);
+    if (next === this.document) return false;
+    this.commitDocumentChange(next);
+    return true;
+  }
+
+  private commitDocumentChange(document: DrawingDocument): void {
+    this.undoStack.push(this.currentState());
+    this.redoStack = [];
+    this.document = document;
+    this.updateOccupiedResolution();
+    this.persistImmediately();
+  }
+
+  private persistImmediately(): void {
+    if (typeof indexedDB === "undefined") return;
+    this.persistencePending = true;
+    if (this.persistenceWriting) return;
+    void this.flushPersistence();
+  }
+
+  private assertNoActiveAction(): void {
+    if (this.actionStart) throw new Error("Cannot change layers during a brush action");
   }
 }
 
@@ -612,4 +789,16 @@ function widthFromVelocity(velocity: number, baseWidth: number): number {
   const velocityFactor = Math.min(velocity / MAX_WIDTH_VELOCITY, 1);
   const widthFactor = SLOW_WIDTH_FACTOR + velocityFactor * (FAST_WIDTH_FACTOR - SLOW_WIDTH_FACTOR);
   return baseWidth * widthFactor;
+}
+
+function cellsForLayer(layer: DrawingLayer, bounds: Bounds, scale: number): RasterCell[] {
+  if (!layer.visible || layer.opacity <= 0) return [];
+  const cells = layer.tree.cellsForRendering(bounds, scale);
+  return cells.map((cell) => ({
+    ...cell,
+    color: layer.opacity >= 1
+      ? cell.color
+      : (cell.color & 0xffffff00) | Math.round((cell.color & 0xff) * layer.opacity),
+    renderGroup: layer.id,
+  }));
 }

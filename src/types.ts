@@ -46,6 +46,8 @@ export type BrushAction = {
 export type RasterCell = {
   bounds: Bounds;
   color: number;
+  /** Paint-order group used to batch cells without merging overlapping layers. */
+  renderGroup?: number;
 };
 
 /** An occupied leaf with its stable address in one immutable quadtree version. */

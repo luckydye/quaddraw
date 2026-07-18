@@ -292,8 +292,13 @@ export class CanvasRenderer {
   }
 
   private drawCells(cells: readonly RasterCell[], context: CanvasRenderingContext2D): void {
-    const regionsByColor = new Map<number, RasterCell[]>();
+    const groups = new Map<number, Map<number, RasterCell[]>>();
     for (const cell of cells) {
+      let regionsByColor = groups.get(cell.renderGroup ?? 0);
+      if (!regionsByColor) {
+        regionsByColor = new Map();
+        groups.set(cell.renderGroup ?? 0, regionsByColor);
+      }
       const regions = regionsByColor.get(cell.color);
       if (regions) regions.push(cell);
       else regionsByColor.set(cell.color, [cell]);
@@ -302,13 +307,15 @@ export class CanvasRenderer {
     // Filling each cell separately makes Canvas anti-alias every shared edge,
     // exposing the quadtree topology as hairline gaps. A compound path is the
     // union of all equal-color leaves, so only the outside boundary is sampled.
-    regionsByColor.forEach((regions, color) => {
-      context.beginPath();
-      for (const region of regions) {
-        context.rect(region.bounds.x, region.bounds.y, region.bounds.width, region.bounds.height);
-      }
-      context.fillStyle = rgbaToCss(color);
-      context.fill();
+    groups.forEach((regionsByColor) => {
+      regionsByColor.forEach((regions, color) => {
+        context.beginPath();
+        for (const region of regions) {
+          context.rect(region.bounds.x, region.bounds.y, region.bounds.width, region.bounds.height);
+        }
+        context.fillStyle = rgbaToCss(color);
+        context.fill();
+      });
     });
   }
 
@@ -562,6 +569,7 @@ function packCells(cells: readonly RasterCell[]): ArrayBuffer {
     view.setFloat32(offset + 8, cell.bounds.width, true);
     view.setFloat32(offset + 12, cell.bounds.height, true);
     view.setUint32(offset + 16, cell.color, true);
+    view.setUint32(offset + 20, cell.renderGroup ?? 0, true);
   });
   return buffer;
 }
