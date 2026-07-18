@@ -190,6 +190,7 @@ function updateBrushPresetState(): void {
 }
 
 function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false): void {
+  syncRendererRasterRevision();
   if (redrawTree) {
     const viewport = currentAction ? renderer.viewportBounds(camera) : renderer.renderBounds(camera);
     renderedWorldBounds = viewport;
@@ -239,6 +240,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
 
 function renderActionRegion(bounds = store.consumeActionDirtyBounds()): void {
   if (!bounds) return;
+  syncRendererRasterRevision();
   // Include the full averaged LOD cells touched by the edit at low zoom.
   const padding = 3 / camera.zoom;
   const renderBounds = {
@@ -341,14 +343,29 @@ function normalizedWheelDelta(event: WheelEvent): number {
 }
 
 function renderViewportPreview(): void {
-  // Transform the detailed cache immediately. A whole-world quadtree LOD sits
-  // behind it, so newly exposed areas remain visible without rebuilding the
-  // expensive full-resolution cache during the navigation gesture.
+  syncRendererRasterRevision();
+  for (const request of renderer.panTileRequests(camera)) {
+    renderer.cachePanTile(
+      camera,
+      request,
+      store.visibleIn(request.queryBounds, camera.zoom),
+      debugQuadtree ? store.debugLeavesIn(request.queryBounds, camera.zoom) : [],
+    );
+  }
+  // Cached same-zoom tiles cover panned-in areas immediately. Zoom previews
+  // continue transforming the prior detail until their rebuild settles.
   render(false, false);
   window.clearTimeout(viewportSettleTimer);
   viewportSettleTimer = window.setTimeout(() => {
     render(true, true, true);
   }, 120);
+}
+
+function syncRendererRasterRevision(): void {
+  renderer.setRasterRevision(
+    store.visualRevision,
+    debugQuadtree ? store.activeLayerId : null,
+  );
 }
 
 function beginDrawing(point: Point): void {

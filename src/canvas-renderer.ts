@@ -21,6 +21,21 @@ const OVERVIEW_SCALE = 0.08;
 const CACHE_MARGIN_FACTOR = 0.2;
 const SELECTION_HIGHLIGHT_CELL_LIMIT = 20_000;
 const DEBUG_FLASH_DURATION_MS = 420;
+const PAN_TILE_SIZE_PX = 256;
+const PAN_TILE_BLEED_PX = 3;
+const PAN_TILE_CACHE_LIMIT = 48;
+
+type PanTile = {
+  bounds: Bounds;
+  canvas: HTMLCanvasElement;
+  zoom: number;
+};
+
+export type PanTileRequest = {
+  key: string;
+  bounds: Bounds;
+  queryBounds: Bounds;
+};
 
 /** Renders colored quadtree regions without reconstructing vector paths. */
 export class CanvasRenderer {
@@ -55,6 +70,9 @@ export class CanvasRenderer {
   private previewCamera: Camera | null = null;
   private debugFlashAnimation: Animation | null = null;
   private debugFlashCamera: Camera | null = null;
+  private panTileRevision = -1;
+  private panTileDebugLayerId: number | null = null;
+  private readonly panTiles = new Map<string, PanTile>();
   private pendingWorkerRender: {
     id: number;
     camera: Camera;
@@ -103,6 +121,7 @@ export class CanvasRenderer {
     this.committedTreeCanvas.width = this.cacheWidth * scale;
     this.committedTreeCanvas.height = this.cacheHeight * scale;
     this.committedTreeContext.setTransform(scale, 0, 0, scale, 0, 0);
+    this.clearPanTileCache();
     this.treeCanvas.width = bounds.width * scale;
     this.treeCanvas.height = bounds.height * scale;
     this.treeContext.setTransform(scale, 0, 0, scale, 0, 0);
@@ -154,6 +173,7 @@ export class CanvasRenderer {
       this.committedTreeContext.restore();
       this.committedCamera = { ...camera };
       this.committedWorldBounds = renderedWorldBounds ?? this.renderBounds(camera);
+      this.captureCommittedViewportTiles(camera);
       if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
       else this.clearDebugFlash();
     }
@@ -172,6 +192,21 @@ export class CanvasRenderer {
     debugRegions: readonly QuadDebugRegion[],
     worldBounds: Bounds,
   ): boolean {
+    return this.renderTreeRegions(camera, [{ cells, debugRegions, worldBounds }]);
+  }
+
+  /** Re-rasterizes several localized regions and composites the result once. */
+  renderTreeRegions(
+    camera: Camera,
+    regions: readonly {
+      cells: readonly RasterCell[];
+      debugRegions: readonly QuadDebugRegion[];
+      worldBounds: Bounds;
+    }[],
+    selection: RasterSelection | null = null,
+    marquee: Bounds | null = null,
+    selectionOffset: Point = { x: 0, y: 0 },
+  ): boolean {
     if (
       !this.committedWorldBounds
       || camera.x !== this.committedCamera.x
@@ -189,26 +224,41 @@ export class CanvasRenderer {
       this.committedCamera.y + this.cacheMarginY,
     );
     this.committedTreeContext.scale(this.committedCamera.zoom, this.committedCamera.zoom);
-    this.committedTreeContext.clearRect(
-      worldBounds.x,
-      worldBounds.y,
-      worldBounds.width,
-      worldBounds.height,
-    );
-    this.committedTreeContext.beginPath();
-    this.committedTreeContext.rect(
-      worldBounds.x,
-      worldBounds.y,
-      worldBounds.width,
-      worldBounds.height,
-    );
-    this.committedTreeContext.clip();
-    this.drawCells(cells, this.committedTreeContext);
-    this.drawDebugRegions(debugRegions, this.committedTreeContext, this.committedCamera.zoom);
+    for (const { cells, debugRegions, worldBounds } of regions) {
+      this.committedTreeContext.save();
+      this.committedTreeContext.clearRect(
+        worldBounds.x,
+        worldBounds.y,
+        worldBounds.width,
+        worldBounds.height,
+      );
+      this.committedTreeContext.beginPath();
+      this.committedTreeContext.rect(
+        worldBounds.x,
+        worldBounds.y,
+        worldBounds.width,
+        worldBounds.height,
+      );
+      this.committedTreeContext.clip();
+      this.drawCells(cells, this.committedTreeContext);
+      this.drawDebugRegions(debugRegions, this.committedTreeContext, this.committedCamera.zoom);
+      this.committedTreeContext.restore();
+    }
     this.committedTreeContext.restore();
-    if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
+    for (const { debugRegions } of regions) {
+      if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
+    }
 
-    this.render(camera, [], [], false, this.committedWorldBounds);
+    this.render(
+      camera,
+      [],
+      [],
+      false,
+      this.committedWorldBounds,
+      selection,
+      marquee,
+      selectionOffset,
+    );
     return true;
   }
 
@@ -345,6 +395,60 @@ export class CanvasRenderer {
     };
   }
 
+  setRasterRevision(revision: number, debugLayerId: number | null): void {
+    if (
+      revision === this.panTileRevision
+      && debugLayerId === this.panTileDebugLayerId
+    ) return;
+    this.clearPanTileCache();
+    this.panTileRevision = revision;
+    this.panTileDebugLayerId = debugLayerId;
+  }
+
+  /** Returns uncached detail tiles needed for the current same-zoom pan. */
+  panTileRequests(camera: Camera): PanTileRequest[] {
+    if (!this.committedWorldBounds) return [];
+    const canPopulate = sameTileZoom(camera.zoom, this.committedCamera.zoom);
+
+    const requests: PanTileRequest[] = [];
+    for (const request of tileRequestsForBounds(this.viewportBounds(camera), camera.zoom)) {
+      const cached = this.panTiles.get(request.key);
+      if (cached) {
+        this.touchPanTile(request.key, cached);
+        continue;
+      }
+      if (!canPopulate) continue;
+      if (containsBounds(this.committedWorldBounds, request.queryBounds)) {
+        this.capturePanTile(request);
+      } else {
+        requests.push(request);
+      }
+    }
+    return requests;
+  }
+
+  cachePanTile(
+    camera: Camera,
+    request: PanTileRequest,
+    cells: readonly RasterCell[],
+    debugRegions: readonly QuadDebugRegion[],
+  ): boolean {
+    if (!sameTileZoom(camera.zoom, this.committedCamera.zoom)) return false;
+    if (this.panTiles.has(request.key)) return true;
+
+    const canvas = this.createPanTileCanvas();
+    const context = canvas.getContext("2d")!;
+    context.setTransform(this.pixelScale, 0, 0, this.pixelScale, 0, 0);
+    context.translate(PAN_TILE_BLEED_PX, PAN_TILE_BLEED_PX);
+    context.scale(camera.zoom, camera.zoom);
+    context.translate(-request.bounds.x, -request.bounds.y);
+    this.drawCells(cells, context);
+    this.drawDebugRegions(debugRegions, context, camera.zoom);
+    this.storePanTile(request.key, { bounds: request.bounds, canvas, zoom: camera.zoom });
+    if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
+    return true;
+  }
+
   toDataUrl(): string { return this.canvas.toDataURL("image/png"); }
 
   private initializeRenderWorker(): void {
@@ -375,6 +479,7 @@ export class CanvasRenderer {
         this.committedCamera = pending.camera;
         this.committedWorldBounds = pending.worldBounds;
         this.pendingWorkerRender = null;
+        this.captureCommittedViewportTiles(pending.camera);
         if (pending.debugRegions.length > 0) {
           this.flashDebugRegions(pending.camera, pending.debugRegions);
         } else {
@@ -616,8 +721,118 @@ export class CanvasRenderer {
     this.debugFlashContext.clearRect(0, 0, this.area.clientWidth, this.area.clientHeight);
   }
 
+  private captureCommittedViewportTiles(camera: Camera): void {
+    if (!this.committedWorldBounds || !sameTileZoom(camera.zoom, this.committedCamera.zoom)) return;
+    for (const request of tileRequestsForBounds(this.viewportBounds(camera), camera.zoom)) {
+      if (this.panTiles.has(request.key)) continue;
+      if (containsBounds(this.committedWorldBounds, request.queryBounds)) {
+        this.capturePanTile(request);
+      }
+    }
+  }
+
+  private capturePanTile(request: PanTileRequest): void {
+    const canvas = this.createPanTileCanvas();
+    const context = canvas.getContext("2d")!;
+    const sourceX = (
+      request.queryBounds.x * this.committedCamera.zoom
+      + this.committedCamera.x
+      + this.cacheMarginX
+    ) * this.pixelScale;
+    const sourceY = (
+      request.queryBounds.y * this.committedCamera.zoom
+      + this.committedCamera.y
+      + this.cacheMarginY
+    ) * this.pixelScale;
+    context.drawImage(
+      this.committedTreeCanvas,
+      sourceX,
+      sourceY,
+      canvas.width,
+      canvas.height,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+    this.storePanTile(request.key, {
+      bounds: request.bounds,
+      canvas,
+      zoom: this.committedCamera.zoom,
+    });
+  }
+
+  private createPanTileCanvas(): HTMLCanvasElement {
+    const canvas = document.createElement("canvas");
+    const size = PAN_TILE_SIZE_PX + PAN_TILE_BLEED_PX * 2;
+    canvas.width = Math.ceil(size * this.pixelScale);
+    canvas.height = Math.ceil(size * this.pixelScale);
+    return canvas;
+  }
+
+  private storePanTile(key: string, tile: PanTile): void {
+    this.panTiles.set(key, tile);
+    while (this.panTiles.size > PAN_TILE_CACHE_LIMIT) {
+      const oldestKey = this.panTiles.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      const oldest = this.panTiles.get(oldestKey);
+      if (oldest) {
+        oldest.canvas.width = 0;
+        oldest.canvas.height = 0;
+      }
+      this.panTiles.delete(oldestKey);
+    }
+  }
+
+  private touchPanTile(key: string, tile: PanTile): void {
+    this.panTiles.delete(key);
+    this.panTiles.set(key, tile);
+  }
+
+  private clearPanTileCache(): void {
+    for (const { canvas } of this.panTiles.values()) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+    this.panTiles.clear();
+  }
+
+  private drawPanTilesForCamera(camera: Camera): void {
+    const viewport = this.viewportBounds(camera);
+    const visibleTiles = [...this.panTiles.entries()]
+      .filter(([, tile]) => rectanglesIntersect(tile.bounds, viewport))
+      // Coarser tiles establish coverage first; sharper cached tiles replace
+      // them wherever their smaller world-space bounds overlap.
+      .sort(([, left], [, right]) => left.zoom - right.zoom);
+    for (const [key, tile] of visibleTiles) {
+      const destinationX = tile.bounds.x * camera.zoom + camera.x;
+      const destinationY = tile.bounds.y * camera.zoom + camera.y;
+      const destinationWidth = tile.bounds.width * camera.zoom;
+      const destinationHeight = tile.bounds.height * camera.zoom;
+      this.treeContext.clearRect(
+        destinationX,
+        destinationY,
+        destinationWidth,
+        destinationHeight,
+      );
+      this.treeContext.drawImage(
+        tile.canvas,
+        PAN_TILE_BLEED_PX * this.pixelScale,
+        PAN_TILE_BLEED_PX * this.pixelScale,
+        PAN_TILE_SIZE_PX * this.pixelScale,
+        PAN_TILE_SIZE_PX * this.pixelScale,
+        destinationX,
+        destinationY,
+        destinationWidth,
+        destinationHeight,
+      );
+      this.touchPanTile(key, tile);
+    }
+  }
+
   private drawTreeForCamera(viewport: DOMRect, camera: Camera): void {
     this.drawOverviewForCamera(camera);
+    this.drawPanTilesForCamera(camera);
 
     // The overview is only a fallback for world space outside the detailed
     // cache. Remove it beneath the cache before compositing; otherwise its
@@ -656,21 +871,21 @@ export class CanvasRenderer {
     const sourceBottom = Math.min(this.cacheHeight, (viewport.height - targetY) / zoomRatio);
     const sourceWidth = sourceRight - sourceX;
     const sourceHeight = sourceBottom - sourceY;
-    if (sourceWidth <= 0 || sourceHeight <= 0) return;
-
-    const destinationX = targetX + sourceX * zoomRatio;
-    const destinationY = targetY + sourceY * zoomRatio;
-    this.treeContext.drawImage(
-      this.committedTreeCanvas,
-      sourceX * this.pixelScale,
-      sourceY * this.pixelScale,
-      sourceWidth * this.pixelScale,
-      sourceHeight * this.pixelScale,
-      destinationX,
-      destinationY,
-      sourceWidth * zoomRatio,
-      sourceHeight * zoomRatio,
-    );
+    if (sourceWidth > 0 && sourceHeight > 0) {
+      const destinationX = targetX + sourceX * zoomRatio;
+      const destinationY = targetY + sourceY * zoomRatio;
+      this.treeContext.drawImage(
+        this.committedTreeCanvas,
+        sourceX * this.pixelScale,
+        sourceY * this.pixelScale,
+        sourceWidth * this.pixelScale,
+        sourceHeight * this.pixelScale,
+        destinationX,
+        destinationY,
+        sourceWidth * zoomRatio,
+        sourceHeight * zoomRatio,
+      );
+    }
   }
 
   private drawOverviewForCamera(camera: Camera): void {
@@ -706,6 +921,60 @@ export class CanvasRenderer {
     context.lineTo(toX, toY);
     context.stroke();
   }
+}
+
+function tileRequestsForBounds(bounds: Bounds, zoom: number): PanTileRequest[] {
+  const tileWorldSize = PAN_TILE_SIZE_PX / zoom;
+  const bleedWorldSize = PAN_TILE_BLEED_PX / zoom;
+  const minimumX = Math.floor(bounds.x / tileWorldSize);
+  const minimumY = Math.floor(bounds.y / tileWorldSize);
+  const maximumX = Math.ceil((bounds.x + bounds.width) / tileWorldSize) - 1;
+  const maximumY = Math.ceil((bounds.y + bounds.height) / tileWorldSize) - 1;
+  const requests: PanTileRequest[] = [];
+  for (let y = minimumY; y <= maximumY; y++) {
+    for (let x = minimumX; x <= maximumX; x++) {
+      const tileX = x * tileWorldSize;
+      const tileY = y * tileWorldSize;
+      requests.push({
+        key: `${tileZoomKey(zoom)}:${x}:${y}`,
+        bounds: {
+          x: tileX,
+          y: tileY,
+          width: tileWorldSize,
+          height: tileWorldSize,
+        },
+        queryBounds: {
+          x: tileX - bleedWorldSize,
+          y: tileY - bleedWorldSize,
+          width: tileWorldSize + bleedWorldSize * 2,
+          height: tileWorldSize + bleedWorldSize * 2,
+        },
+      });
+    }
+  }
+  return requests;
+}
+
+function tileZoomKey(zoom: number): number {
+  return Math.round(zoom * 100_000);
+}
+
+function sameTileZoom(left: number, right: number): boolean {
+  return tileZoomKey(left) === tileZoomKey(right);
+}
+
+function containsBounds(container: Bounds, contained: Bounds): boolean {
+  return contained.x >= container.x
+    && contained.y >= container.y
+    && contained.x + contained.width <= container.x + container.width
+    && contained.y + contained.height <= container.y + container.height;
+}
+
+function rectanglesIntersect(left: Bounds, right: Bounds): boolean {
+  return left.x < right.x + right.width
+    && left.x + left.width > right.x
+    && left.y < right.y + right.height
+    && left.y + left.height > right.y;
 }
 
 function sameCamera(left: Camera, right: Camera | null): boolean {

@@ -47,6 +47,7 @@ const PERSISTENCE_DEBOUNCE_MS = 750;
 /** Owns layer edits, brush transactions, history, and sparse raster trees. */
 export class DrawingStore {
   private document = createDrawingDocument();
+  private visualRevisionValue = 0;
   private undoStack: DrawingState[] = [];
   private redoStack: DrawingState[] = [];
   private actionStart: DrawingState | null = null;
@@ -67,6 +68,7 @@ export class DrawingStore {
     const restored = await loadDrawing();
     if (!restored) return;
     this.document = restored.document;
+    this.visualRevisionValue += 1;
     this.updateOccupiedResolution();
     this.setSnapshotSizes(restored.snapshotSizes);
   }
@@ -212,6 +214,7 @@ export class DrawingStore {
         strokeCount: 0,
       })),
     };
+    this.visualRevisionValue += 1;
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
@@ -368,6 +371,11 @@ export class DrawingStore {
     return this.document.layers.reduce((count, layer) => count + layer.strokeCount, 0);
   }
 
+  /** Changes whenever cached composited raster output may have become stale. */
+  get visualRevision(): number {
+    return this.visualRevisionValue;
+  }
+
   get nodeCount(): number {
     return this.document.layers.reduce((count, layer) => count + layer.tree.countNodes(), 0);
   }
@@ -467,9 +475,13 @@ export class DrawingStore {
       action.color,
       action.kind === "eraser",
     );
-    this.document = replaceLayer(this.actionStart.document, this.actionLayerId, (layer) => (
+    const nextDocument = replaceLayer(this.actionStart.document, this.actionLayerId, (layer) => (
       tree === layer.tree ? layer : { ...layer, tree }
     ));
+    if (nextDocument !== this.document) {
+      this.document = nextDocument;
+      this.visualRevisionValue += 1;
+    }
   }
 
   private paintBufferedStrokeStart(action: BrushAction): void {
@@ -560,6 +572,7 @@ export class DrawingStore {
 
   private restoreState(state: DrawingState): void {
     this.document = state.document;
+    this.visualRevisionValue += 1;
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
@@ -645,9 +658,13 @@ export class DrawingStore {
   }
 
   private set tree(tree: RasterQuadTree) {
-    this.document = replaceLayer(this.document, this.document.activeLayerId, (layer) => (
+    const nextDocument = replaceLayer(this.document, this.document.activeLayerId, (layer) => (
       tree === layer.tree ? layer : { ...layer, tree }
     ));
+    if (nextDocument !== this.document) {
+      this.document = nextDocument;
+      this.visualRevisionValue += 1;
+    }
   }
 
   private updateLayer(
@@ -666,6 +683,7 @@ export class DrawingStore {
     this.undoStack.push(this.currentState());
     this.redoStack = [];
     this.document = document;
+    this.visualRevisionValue += 1;
     this.updateOccupiedResolution();
     this.persistLayerChange();
   }
