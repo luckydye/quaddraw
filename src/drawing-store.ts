@@ -1,190 +1,168 @@
-import { QuadTree } from "./quadtree";
+import { RasterQuadTree } from "./quadtree";
 import { loadQuadTree, saveQuadTree } from "./quadtree-storage";
-import { freezeStrokeGeometry } from "./stroke-geometry";
-import { boundsAround, boundsFromPoints, type Bounds, type Point, type Stroke, WORLD_BOUNDS } from "./types";
+import type { Bounds, BrushAction, Point, QuadDebugRegion, RasterCell } from "./types";
+import { WORLD_BOUNDS } from "./types";
 
-/** Owns drawing operations, history, and the quadtree spatial index. */
+type DrawingState = {
+  tree: RasterQuadTree;
+  strokeCount: number;
+};
+
+const SLOW_WIDTH_FACTOR = 0.55;
+const FAST_WIDTH_FACTOR = 1.55;
+const WIDTH_RESPONSE = 0.4;
+const MAX_WIDTH_VELOCITY = 0.9;
+
+/** Owns brush transactions, history, and the sparse raster quadtree. */
 export class DrawingStore {
-  private paths: Stroke[] = [];
-  private undoStack: Stroke[][] = [];
-  private redoStack: Stroke[][] = [];
-  private index = this.createIndex();
-  private nextPathId = 1;
+  private tree = new RasterQuadTree(WORLD_BOUNDS);
+  private committedStrokeCount = 0;
+  private undoStack: DrawingState[] = [];
+  private redoStack: DrawingState[] = [];
+  private actionStart: DrawingState | null = null;
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
 
   async restore(): Promise<void> {
-    const restoredIndex = await loadQuadTree();
-    if (!restoredIndex) {
+    const restored = await loadQuadTree();
+    if (!restored) return;
+    this.tree = restored.tree;
+    this.committedStrokeCount = restored.strokeCount;
+  }
+
+  createStroke(point: Point, color: string, width: number): BrushAction {
+    return this.createAction("stroke", point, color, width);
+  }
+
+  createEraser(point: Point, width: number): BrushAction {
+    return this.createAction("eraser", point, "#000000", width);
+  }
+
+  appendPoint(action: BrushAction, point: Point): void {
+    const previousPoint = action.points.at(-1)!;
+    if (action.kind === "stroke") {
+      const targetWidth = velocityWidth(previousPoint, point, action.width);
+      const previousWidth = previousPoint.strength ?? action.width;
+      point.strength = previousWidth + (targetWidth - previousWidth) * WIDTH_RESPONSE;
+    }
+    action.points.push(point);
+    this.paint(previousPoint, point, action, ((previousPoint.strength ?? action.width) + (point.strength ?? action.width)) / 2);
+  }
+
+  commit(action: BrushAction): void {
+    if (!this.actionStart) return;
+    if (this.tree === this.actionStart.tree) {
+      this.actionStart = null;
       return;
     }
-
-    this.index = restoredIndex;
-    this.paths = restoredIndex.allItems().sort((first, second) => first.id - second.id);
-    this.paths.forEach((path) => {
-      if (!path.segments) freezeStrokeGeometry(path);
-    });
-    this.nextPathId = Math.max(0, ...this.paths.map((path) => path.id)) + 1;
-    this.persist();
-  }
-
-  createStroke(point: Point, color: string, width: number): Stroke {
-    return this.createPath("stroke", point, color, width, 0.28);
-  }
-
-  createEraser(point: Point, width: number): Stroke {
-    return this.createPath("eraser", point, "#000000", width, 0);
-  }
-
-  appendPoint(path: Stroke, point: Point): void {
-    const previousPoint = path.points.at(-1)!;
-    if (path.kind === "stroke") {
-      const targetWidth = velocityWidth(previousPoint, point, path.width);
-      const previousWidth = previousPoint.strength ?? path.width;
-      point.strength = previousWidth + (targetWidth - previousWidth) * 0.3;
-    }
-    path.points.push(point);
-    path.segments = undefined;
-    path.bounds = boundsFromPoints(path.points, path.width);
-  }
-
-  commit(path: Stroke): void {
-    if (path.points.length === 1) {
-      path.points.push({ x: path.points[0].x + 0.1, y: path.points[0].y });
-    }
-
-    path.bounds = boundsFromPoints(path.points, path.width);
-    freezeStrokeGeometry(path);
-    this.saveForUndo();
-    this.paths.push(path);
-    this.index.insert(path);
+    this.undoStack.push(this.actionStart);
+    this.redoStack = [];
+    this.actionStart = null;
+    if (action.kind === "stroke") this.committedStrokeCount += 1;
     this.persist();
   }
 
   undo(): boolean {
-    const previousPaths = this.undoStack.pop();
-    if (!previousPaths) {
-      return false;
-    }
-
-    this.redoStack.push([...this.paths]);
-    this.paths = previousPaths;
-    this.rebuildIndex();
+    const previous = this.undoStack.pop();
+    if (!previous) return false;
+    this.redoStack.push(this.currentState());
+    this.restoreState(previous);
     this.persist();
     return true;
   }
 
   redo(): boolean {
-    const nextPaths = this.redoStack.pop();
-    if (!nextPaths) {
-      return false;
-    }
-
-    this.undoStack.push([...this.paths]);
-    this.paths = nextPaths;
-    this.rebuildIndex();
+    const next = this.redoStack.pop();
+    if (!next) return false;
+    this.undoStack.push(this.currentState());
+    this.restoreState(next);
     this.persist();
     return true;
   }
 
   clear(): void {
-    if (this.paths.length === 0) {
-      return;
-    }
-
-    this.saveForUndo();
-    this.paths = [];
-    this.index = this.createIndex();
+    if (this.committedStrokeCount === 0 && this.tree.countNodes() === 1) return;
+    this.undoStack.push(this.currentState());
+    this.redoStack = [];
+    this.tree = new RasterQuadTree(WORLD_BOUNDS);
+    this.committedStrokeCount = 0;
+    this.actionStart = null;
     this.persist();
   }
 
-  visibleIn(bounds: Bounds): Stroke[] {
-    // Tree traversal is spatial, not chronological; replay paths by creation
-    // order so an eraser only affects ink that was drawn before it.
-    return this.index.query(bounds).sort((first, second) => first.id - second.id);
+  visibleIn(bounds: Bounds): RasterCell[] {
+    return this.tree.cellsIn(bounds);
   }
 
-  all(): readonly Stroke[] {
-    return this.paths;
+  allCells(): RasterCell[] {
+    return this.tree.allCells();
+  }
+
+  debugLeavesIn(bounds: Bounds): QuadDebugRegion[] {
+    return this.tree.debugLeavesIn(bounds);
   }
 
   get strokeCount(): number {
-    return this.paths.filter((path) => path.kind === "stroke").length;
+    return this.committedStrokeCount;
   }
 
   get nodeCount(): number {
-    return this.index.countNodes();
+    return this.tree.countNodes();
   }
 
-  private createPath(
-    kind: Stroke["kind"],
-    point: Point,
-    color: string,
-    width: number,
-    softness: number,
-  ): Stroke {
-    return {
-      id: this.nextPathId++,
+  private createAction(kind: BrushAction["kind"], point: Point, color: string, width: number): BrushAction {
+    if (!this.actionStart) this.actionStart = this.currentState();
+    const action: BrushAction = {
       kind,
-      points: [{ ...point, strength: width }],
+      points: [{ ...point, strength: kind === "stroke" ? width * SLOW_WIDTH_FACTOR : width }],
       color,
       width,
-      softness,
-      bounds: boundsAround(point, 1),
     };
+    this.paint(action.points[0], action.points[0], action, width);
+    return action;
   }
 
-  private saveForUndo(): void {
-    this.undoStack.push([...this.paths]);
-    this.redoStack = [];
+  private paint(start: Point, end: Point, action: BrushAction, width: number): void {
+    this.tree = this.tree.paintSegment(start, end, width, action.color, action.kind === "eraser");
   }
 
-  private rebuildIndex(): void {
-    this.index = this.createIndex();
-    this.paths.forEach((path) => this.index.insert(path));
+  private currentState(): DrawingState {
+    return { tree: this.tree, strokeCount: this.committedStrokeCount };
   }
 
-  private createIndex(): QuadTree<Stroke> {
-    return new QuadTree<Stroke>(WORLD_BOUNDS);
+  private restoreState(state: DrawingState): void {
+    this.tree = state.tree;
+    this.committedStrokeCount = state.strokeCount;
+    this.actionStart = null;
   }
 
   private persist(): void {
     this.persistencePending = true;
-    if (this.persistenceQueued || this.persistenceWriting) {
-      return;
-    }
+    if (this.persistenceQueued || this.persistenceWriting) return;
 
     this.persistenceQueued = true;
     const writeTree = () => void this.flushPersistence();
-
-    if ("requestIdleCallback" in window) {
-      window.requestIdleCallback(writeTree, { timeout: 1_000 });
-    } else {
-      window.setTimeout(writeTree, 0);
-    }
+    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(writeTree, { timeout: 1_000 });
+    else globalThis.setTimeout(writeTree, 0);
   }
 
   private async flushPersistence(): Promise<void> {
     this.persistenceQueued = false;
     this.persistenceWriting = true;
-
     while (this.persistencePending) {
       this.persistencePending = false;
-      await saveQuadTree(this.index);
+      await saveQuadTree(this.tree, this.committedStrokeCount);
     }
-
     this.persistenceWriting = false;
   }
 }
 
 function velocityWidth(previous: Point, current: Point, baseWidth: number): number {
-  if (previous.time === undefined || current.time === undefined) {
-    return baseWidth;
-  }
-
+  if (previous.time === undefined || current.time === undefined) return baseWidth * SLOW_WIDTH_FACTOR;
   const distance = Math.hypot(current.x - previous.x, current.y - previous.y);
   const elapsed = Math.max(current.time - previous.time, 1);
-  const velocityFactor = Math.min((distance / elapsed) / 1.1, 1);
-  return baseWidth * (1.4 - velocityFactor * 0.7);
+  const velocityFactor = Math.min((distance / elapsed) / MAX_WIDTH_VELOCITY, 1);
+  const widthFactor = SLOW_WIDTH_FACTOR + velocityFactor * (FAST_WIDTH_FACTOR - SLOW_WIDTH_FACTOR);
+  return baseWidth * widthFactor;
 }

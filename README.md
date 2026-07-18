@@ -1,5 +1,22 @@
 # quaddraw
 
+## Architecture
+
+The drawing itself is a sparse raster quadtree, not a collection of retained
+vector paths. Pointer samples are converted into brush capsules that recursively
+paint immutable quadtree nodes. Uniform areas remain compressed as one node;
+only brush edges subdivide to pixel-sized leaves. The canvas renderer traverses
+and fills the visible colored nodes directly.
+
+Undo and redo retain copy-on-write tree roots, so unchanged branches are shared.
+IndexedDB persistence stores the raster values and full tree topology in the
+`QDR2` binary snapshot format. Pointer samples are transient and are neither
+rendered as paths nor persisted.
+
+Use the `Q` shortcut or the quadtree toolbar button to overlay the live leaf
+topology. Outline hue represents depth, and occupied leaves are emphasized over
+their transparent siblings.
+
 ## Development
 
 ### Setup

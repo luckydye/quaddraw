@@ -19,6 +19,8 @@
             <div class="toolbar-rule"></div>
             <button class="tool" id="undo" title="Undo (⌘ Z)"><span>↶</span></button>
             <button class="tool" id="redo" title="Redo (⇧ ⌘ Z)"><span>↷</span></button>
+            <div class="toolbar-rule"></div>
+            <button class="tool" id="debugTree" title="Quadtree debug view (Q)" aria-pressed="false"><span>▦</span></button>
           </aside>
           <canvas id="drawingCanvas"></canvas>
           <div class="canvas-hint" id="canvasHint"><kbd>Space</kbd> + drag to pan &nbsp;·&nbsp; scroll to zoom</div>
@@ -39,7 +41,7 @@
         <div class="status-left">
           <span id="coordinateReadout">X: 0 &nbsp; Y: 0</span>
           <span class="status-divider"></span>
-          <span><span class="tree-dot"></span> Quadtree · <span id="strokeCount">0</span> strokes · <span id="nodeCount">1</span> node</span>
+          <span><span class="tree-dot"></span> Raster quadtree · <span id="strokeCount">0</span> strokes · <span id="nodeCount">1</span> node</span>
         </div>
         <div class="status-right"><button id="exportButton">Export</button><button id="clearButton" class="clear">Clear canvas</button></div>
       </footer>

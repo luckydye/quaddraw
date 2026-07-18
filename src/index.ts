@@ -1,6 +1,6 @@
 import { CanvasRenderer } from "./canvas-renderer";
 import { DrawingStore } from "./drawing-store";
-import type { Camera, Point, Stroke, Tool } from "./types";
+import type { BrushAction, Camera, Point, QuadDebugRegion, RasterCell, Tool } from "./types";
 
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 4;
@@ -20,6 +20,7 @@ const elements = {
   weight: requiredElement<HTMLInputElement>("#weight"),
   weightValue: requiredElement<HTMLOutputElement>("#weightValue"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
+  debugTree: requiredElement<HTMLButtonElement>("#debugTree"),
   toast: requiredElement<HTMLElement>("#toast"),
 };
 
@@ -29,8 +30,10 @@ const renderer = new CanvasRenderer(elements.canvas, elements.minimap, elements.
 let camera: Camera = { x: 0, y: 0, zoom: 1 };
 let activeTool: Tool = "pen";
 let activeColor = "#393b42";
-let currentStroke: Stroke | null = null;
-let visibleStrokes: readonly Stroke[] = [];
+let currentAction: BrushAction | null = null;
+let visibleCells: readonly RasterCell[] = [];
+let visibleDebugRegions: readonly QuadDebugRegion[] = [];
+let debugQuadtree = false;
 let isPanning = false;
 let isSpacePressed = false;
 let lastPointerPosition: Point | null = null;
@@ -44,14 +47,16 @@ function requiredElement<T extends Element>(selector: string): T {
   return element;
 }
 
-function render(redrawCommittedInk = true): void {
-  if (redrawCommittedInk) {
-    visibleStrokes = store.visibleIn(renderer.viewportBounds(camera));
+function render(redrawTree = true, redrawMinimap = redrawTree): void {
+  if (redrawTree) {
+    const viewport = renderer.viewportBounds(camera);
+    visibleCells = store.visibleIn(viewport);
+    visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(viewport) : [];
   }
 
-  renderer.render(camera, visibleStrokes, currentStroke, redrawCommittedInk);
-  if (redrawCommittedInk) {
-    renderer.renderMinimap(camera, store.all());
+  renderer.render(camera, visibleCells, visibleDebugRegions, redrawTree);
+  if (redrawMinimap) {
+    renderer.renderMinimap(camera, store.allCells());
   }
   updateStatus();
 }
@@ -69,6 +74,14 @@ function selectTool(tool: Tool): void {
   document.querySelectorAll<HTMLElement>(".tool[data-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.tool === tool);
   });
+}
+
+function toggleQuadtreeDebug(): void {
+  debugQuadtree = !debugQuadtree;
+  elements.debugTree.classList.toggle("active", debugQuadtree);
+  elements.debugTree.setAttribute("aria-pressed", String(debugQuadtree));
+  render(true, false);
+  showToast(`Quadtree debug ${debugQuadtree ? "on" : "off"}`);
 }
 
 function updateCameraZoom(nextZoom: number, focusPoint?: Point): void {
@@ -91,14 +104,15 @@ function renderViewportPreview(): void {
 }
 
 function beginDrawing(point: Point): void {
-  currentStroke = store.createStroke(point, activeColor, Number(elements.weight.value));
+  currentAction = store.createStroke(point, activeColor, Number(elements.weight.value));
   elements.hint.style.opacity = "0";
+  render(true, false);
 }
 
 function finishInteraction(): void {
-  if (currentStroke) {
-    store.commit(currentStroke);
-    currentStroke = null;
+  if (currentAction) {
+    store.commit(currentAction);
+    currentAction = null;
   }
 
   isPanning = false;
@@ -126,7 +140,8 @@ function bindCanvasEvents(): void {
     }
 
     if (activeTool === "eraser" && !isSpacePressed) {
-      currentStroke = store.createEraser(point, ERASER_WIDTH);
+      currentAction = store.createEraser(point, ERASER_WIDTH);
+      render(true, false);
       return;
     }
 
@@ -140,12 +155,12 @@ function bindCanvasEvents(): void {
     const point = renderer.screenToWorld(event, camera);
     elements.coordinateReadout.textContent = `X: ${Math.round(point.x)}   Y: ${Math.round(point.y)}`;
 
-    if (currentStroke) {
+    if (currentAction) {
       const coalescedEvents = event.getCoalescedEvents?.() ?? [event];
       for (const coalescedEvent of coalescedEvents) {
-        store.appendPoint(currentStroke, renderer.screenToWorld(coalescedEvent, camera));
+        store.appendPoint(currentAction, renderer.screenToWorld(coalescedEvent, camera));
       }
-      render(false);
+      render(true, false);
       return;
     }
 
@@ -181,6 +196,8 @@ function bindControls(): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((button) => {
     button.addEventListener("click", () => selectTool(button.dataset.tool as Tool));
   });
+
+  elements.debugTree.addEventListener("click", toggleQuadtreeDebug);
 
   elements.weight.addEventListener("input", () => {
     elements.weightValue.textContent = `${elements.weight.value} px`;
@@ -240,6 +257,9 @@ function bindKeyboardShortcuts(): void {
     if (event.key.toLowerCase() === "p") selectTool("pen");
     if (event.key.toLowerCase() === "e") selectTool("eraser");
     if (event.key.toLowerCase() === "h") selectTool("hand");
+    if (event.key.toLowerCase() === "q" && !event.metaKey && !event.ctrlKey && !event.repeat) {
+      toggleQuadtreeDebug();
+    }
 
     if ((event.metaKey || event.ctrlKey) && event.key === "z") {
       event.preventDefault();
