@@ -1,6 +1,15 @@
 import { CanvasRenderer } from "./canvas-renderer";
 import { DrawingStore } from "./drawing-store";
-import type { Bounds, BrushAction, Camera, Point, QuadDebugRegion, RasterCell, Tool } from "./types";
+import type {
+  Bounds,
+  BrushAction,
+  BrushTexture,
+  Camera,
+  Point,
+  QuadDebugRegion,
+  RasterCell,
+  Tool,
+} from "./types";
 
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 4;
@@ -22,6 +31,7 @@ const elements = {
   weightValue: requiredElement<HTMLOutputElement>("#weightValue"),
   density: requiredElement<HTMLInputElement>("#density"),
   densityValue: requiredElement<HTMLOutputElement>("#densityValue"),
+  brushTexture: requiredElement<HTMLSelectElement>("#brushTexture"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
   debugTree: requiredElement<HTMLButtonElement>("#debugTree"),
   toast: requiredElement<HTMLElement>("#toast"),
@@ -42,6 +52,12 @@ let isPanning = false;
 let isSpacePressed = false;
 let lastPointerPosition: Point | null = null;
 let viewportSettleTimer: number | undefined;
+let textureSeed = Date.now() >>> 0;
+
+function nextTextureSeed(): number {
+  textureSeed = (textureSeed + 1) >>> 0;
+  return textureSeed;
+}
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -153,6 +169,8 @@ function beginDrawing(point: Point): void {
     activeColor,
     Number(elements.weight.value),
     Number(elements.density.value) / 100,
+    elements.brushTexture.value as BrushTexture,
+    nextTextureSeed(),
   );
   elements.hint.style.opacity = "0";
   render(true, false);

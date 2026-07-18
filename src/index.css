@@ -170,6 +170,22 @@ button {
 .swatches button.selected {
     outline-color: #5b5dd1;
 }
+.inspector select {
+    width: 100%;
+    height: 30px;
+    margin-top: 8px;
+    padding: 0 8px;
+    border: 1px solid #dedee3;
+    border-radius: 5px;
+    color: #5f5f67;
+    background: #fff;
+    font: inherit;
+    font-size: 11px;
+}
+.inspector select:focus-visible {
+    outline: 2px solid #5b5dd155;
+    outline-offset: 1px;
+}
 .weight-row {
     display: flex;
     align-items: center;

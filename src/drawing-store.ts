@@ -1,6 +1,6 @@
 import { RasterQuadTree } from "./quadtree";
 import { loadQuadTree, saveQuadTree, type SnapshotSizes } from "./quadtree-storage";
-import type { Bounds, BrushAction, Point, QuadDebugRegion, RasterCell } from "./types";
+import type { Bounds, BrushAction, BrushTexture, Point, QuadDebugRegion, RasterCell } from "./types";
 import { WORLD_BOUNDS } from "./types";
 
 type DrawingState = {
@@ -17,6 +17,8 @@ const WIDTH_GROWTH_DISTANCE = 14;
 const WIDTH_SHRINK_DISTANCE = 4;
 const CURVE_FLATNESS = 0.2;
 const MAX_CURVE_DEPTH = 8;
+const PRESSURE_SAMPLE_DELTA = 0.015;
+const PRESSURE_RESPONSE_DELTA = 0.12;
 
 /** Owns brush transactions, history, and the sparse raster quadtree. */
 export class DrawingStore {
@@ -41,18 +43,32 @@ export class DrawingStore {
     if (restored.needsUpgrade) this.persist();
   }
 
-  createStroke(point: Point, color: string, width: number, density = 1): BrushAction {
-    return this.createAction("stroke", point, color, width, density);
+  createStroke(
+    point: Point,
+    color: string,
+    width: number,
+    density = 1,
+    texture: BrushTexture = "solid",
+    textureSeed = 0,
+  ): BrushAction {
+    return this.createAction("stroke", point, color, width, density, texture, textureSeed);
   }
 
   createEraser(point: Point, width: number): BrushAction {
-    return this.createAction("eraser", point, "#000000", width, 1);
+    return this.createAction("eraser", point, "#000000", width, 1, "solid", 0);
   }
 
   appendPoint(action: BrushAction, point: Point): void {
     const previousPoint = action.points[action.points.length - 1];
     const movementDistance = Math.hypot(point.x - previousPoint.x, point.y - previousPoint.y);
-    if (action.kind === "stroke" && movementDistance < MINIMUM_POINT_DISTANCE) return;
+    const pressureChange = point.pressure === undefined || previousPoint.pressure === undefined
+      ? 0
+      : Math.abs(point.pressure - previousPoint.pressure);
+    if (
+      action.kind === "stroke"
+      && movementDistance < MINIMUM_POINT_DISTANCE
+      && pressureChange < PRESSURE_SAMPLE_DELTA
+    ) return;
     action.points.push(point);
 
     if (action.kind === "stroke" && action.points[0].strength === undefined) {
@@ -61,11 +77,16 @@ export class DrawingStore {
     }
 
     if (action.kind === "stroke") {
-      const targetWidth = velocityWidth(previousPoint, point, action.width);
+      const targetWidth = pressureAdjustedWidth(
+        velocityWidth(previousPoint, point, action.width),
+        point.pressure,
+      );
       const responseDistance = targetWidth > previousPoint.strength!
         ? WIDTH_GROWTH_DISTANCE
         : WIDTH_SHRINK_DISTANCE;
-      const response = 1 - Math.exp(-movementDistance / responseDistance);
+      const response = 1 - Math.exp(
+        -movementDistance / responseDistance - pressureChange / PRESSURE_RESPONSE_DELTA,
+      );
       point.strength = previousPoint.strength! + (targetWidth - previousPoint.strength!) * response;
       this.paintReadyStrokeSegments(action, false);
       return;
@@ -85,8 +106,9 @@ export class DrawingStore {
     if (action.kind === "stroke" && action.points[0].strength === undefined) {
       if (action.points.length === 1) {
         // A tap never produces a velocity sample, so commit a neutral-width dot.
-        action.points[0].strength = action.width;
-        this.paint(action.points[0], action.points[0], action, action.width, action.width);
+        const tapWidth = pressureAdjustedWidth(action.width, action.points[0].pressure);
+        action.points[0].strength = tapWidth;
+        this.paint(action.points[0], action.points[0], action, tapWidth, tapWidth);
         this.applyActionMask(action);
       } else {
         this.paintBufferedStrokeStart(action);
@@ -172,6 +194,8 @@ export class DrawingStore {
     color: string,
     width: number,
     density: number,
+    texture: BrushTexture,
+    textureSeed: number,
   ): BrushAction {
     if (!this.actionStart) {
       this.actionStart = this.currentState();
@@ -183,6 +207,8 @@ export class DrawingStore {
       color,
       width,
       density: Math.max(0, Math.min(1, density)),
+      texture,
+      textureSeed,
       rasterizedSegments: 0,
     };
     if (kind === "eraser") {
@@ -198,6 +224,8 @@ export class DrawingStore {
     action: BrushAction,
     startWidth: number,
     endWidth: number,
+    startDensity = densityForPoint(action, start),
+    endDensity = densityForPoint(action, end),
   ): void {
     if (!this.actionStart || !this.actionMask) return;
     this.actionMask = this.actionMask.paintSegment(
@@ -207,7 +235,10 @@ export class DrawingStore {
       endWidth,
       "#000000",
       false,
-      action.density,
+      startDensity,
+      action.texture,
+      action.textureSeed,
+      endDensity,
     );
   }
 
@@ -225,7 +256,9 @@ export class DrawingStore {
 
     // Use the look-ahead measurement for the whole startup window. Replaying
     // local startup jitter would recreate the bulb this buffer is meant to avoid.
-    action.points.forEach((point) => { point.strength = initialWidth; });
+    action.points.forEach((point) => {
+      point.strength = pressureAdjustedWidth(initialWidth, point.pressure);
+    });
     this.paintReadyStrokeSegments(action, false);
   }
 
@@ -258,6 +291,16 @@ export class DrawingStore {
     const curve = bsplineBezier(before, start, end, after);
     const curveStartWidth = (beforeWidth + startWidth * 4 + endWidth) / 6;
     const curveEndWidth = (startWidth + endWidth * 4 + afterWidth) / 6;
+    const startDensity = densityForPoint(action, start);
+    const endDensity = densityForPoint(action, end);
+    const beforeDensity = index > 0
+      ? densityForPoint(action, action.points[index - 1])
+      : startDensity * 2 - endDensity;
+    const afterDensity = index + 2 < action.points.length
+      ? densityForPoint(action, action.points[index + 2])
+      : endDensity * 2 - startDensity;
+    const curveStartDensity = (beforeDensity + startDensity * 4 + endDensity) / 6;
+    const curveEndDensity = (startDensity + endDensity * 4 + afterDensity) / 6;
     const samples: CurveSample[] = [{ point: curve.start, amount: 0 }];
     flattenCubic(
       curve.start,
@@ -279,6 +322,8 @@ export class DrawingStore {
         action,
         interpolate(curveStartWidth, curveEndWidth, previous.amount),
         interpolate(curveStartWidth, curveEndWidth, current.amount),
+        interpolate(curveStartDensity, curveEndDensity, previous.amount),
+        interpolate(curveStartDensity, curveEndDensity, current.amount),
       );
     }
   }
@@ -417,6 +462,17 @@ function midpoint(first: Point, second: Point): Point {
 
 function interpolate(start: number, end: number, amount: number): number {
   return start + (end - start) * amount;
+}
+
+function pressureAdjustedWidth(width: number, pressure: number | undefined): number {
+  if (pressure === undefined) return width;
+  return width * (0.3 + Math.max(0, Math.min(1, pressure)) * 1.2);
+}
+
+function densityForPoint(action: BrushAction, point: Point): number {
+  if (action.kind === "eraser" || point.pressure === undefined) return action.density;
+  const pressure = Math.max(0, Math.min(1, point.pressure));
+  return action.density * (0.08 + pressure * 0.92);
 }
 
 function initialVelocityIsReady(action: BrushAction): boolean {

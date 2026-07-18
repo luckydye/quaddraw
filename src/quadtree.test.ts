@@ -87,6 +87,44 @@ describe("RasterQuadTree", () => {
     expect(tree.allCells()[0].color & 0xff).toBe(102);
   });
 
+  test("interpolates pressure-driven density along a segment", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      0.1,
+      "solid",
+      0,
+      1,
+    );
+    const maximumAlpha = (x: number) => Math.max(...tree.cellsIn({ x, y: -1, width: 3, height: 2 })
+      .map((cell) => cell.color & 0xff));
+
+    expect(maximumAlpha(36)).toBeGreaterThan(maximumAlpha(1));
+  });
+
+  test("uses increased pressure for a stationary pen sample", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      2,
+      10,
+      "#393b42",
+      false,
+      0.1,
+      "solid",
+      0,
+      1,
+    );
+
+    expect(tree.cellsIn({ x: 3, y: -1, width: 1, height: 2 }).length).toBeGreaterThan(0);
+    expect(Math.max(...tree.cellsIn({ x: -1, y: -1, width: 2, height: 2 })
+      .map((cell) => cell.color & 0xff))).toBe(255);
+  });
+
   test("composites a unioned stroke mask only once over another color", () => {
     const empty = new RasterQuadTree(WORLD_BOUNDS);
     const red = empty.paintSegment(
@@ -125,6 +163,142 @@ describe("RasterQuadTree", () => {
     const mixedColor = once.allCells()[0].color;
     expect((mixedColor >>> 24) & 0xff).toBeGreaterThan(0x4c);
     expect((mixedColor >>> 8) & 0xff).toBeLessThan(0xeb);
+  });
+
+  test("darkens where separate same-color stroke masks overlap", () => {
+    const empty = new RasterQuadTree(WORLD_BOUNDS);
+    const firstStroke = empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#53b66e",
+      false,
+      0.5,
+    );
+    const secondStrokeMask = empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#000000",
+      false,
+      0.5,
+    );
+
+    const layered = firstStroke.applyMask(secondStrokeMask, "#53b66e");
+
+    expect(firstStroke.allCells()[0].color & 0xff).toBe(128);
+    expect(layered.allCells()[0].color & 0xff).toBe(192);
+  });
+
+  test("creates stable grain for textured brush masks", () => {
+    const empty = new RasterQuadTree(WORLD_BOUNDS);
+    const paintCharcoal = (seed: number) => empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      1,
+      "charcoal",
+      seed,
+    );
+    const charcoal = paintCharcoal(123);
+    const sameCharcoal = paintCharcoal(123);
+    const differentCharcoal = paintCharcoal(456);
+
+    expect(sameCharcoal.snapshot()).toEqual(charcoal.snapshot());
+    expect(differentCharcoal.snapshot()).not.toEqual(charcoal.snapshot());
+    expect(new Set(charcoal.allCells().map((cell) => cell.color & 0xff)).size).toBeGreaterThan(10);
+    expect(charcoal.paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      1,
+      "charcoal",
+      123,
+    ).snapshot()).toEqual(charcoal.snapshot());
+  });
+
+  test("gives charcoal less uniform ink coverage than solid", () => {
+    const empty = new RasterQuadTree(WORLD_BOUNDS);
+    const paint = (texture: "solid" | "charcoal") => empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      1,
+      texture,
+      123,
+    );
+    const inkCoverage = (tree: RasterQuadTree) => tree.allCells().reduce(
+      (total, cell) => total + cell.bounds.width * cell.bounds.height * (cell.color & 0xff) / 255,
+      0,
+    );
+
+    const solidCoverage = inkCoverage(paint("solid"));
+    const charcoalCoverage = inkCoverage(paint("charcoal"));
+
+    expect(charcoalCoverage).toBeLessThan(solidCoverage);
+  });
+
+  test("keeps charcoal grain tonal through the stroke core", () => {
+    const charcoal = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      1,
+      "charcoal",
+      123,
+    );
+    const cells = charcoal.cellsIn({ x: 0, y: -2, width: 40, height: 4 });
+
+    for (let x = 0; x <= 40; x += 2) {
+      for (let y = -2; y <= 2; y += 2) {
+        expect(cells.some((cell) =>
+          x >= cell.bounds.x
+          && x < cell.bounds.x + cell.bounds.width
+          && y >= cell.bounds.y
+          && y < cell.bounds.y + cell.bounds.height
+        )).toBe(true);
+      }
+    }
+  });
+
+  test("feathers charcoal coverage toward its outer edge", () => {
+    const charcoal = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      10,
+      10,
+      "#393b42",
+      false,
+      1,
+      "charcoal",
+      123,
+    );
+    const cells = charcoal.allCells();
+    const alphaAt = (x: number, y: number) => cells.find((cell) =>
+      x >= cell.bounds.x
+      && x < cell.bounds.x + cell.bounds.width
+      && y >= cell.bounds.y
+      && y < cell.bounds.y + cell.bounds.height
+    )?.color as number | undefined;
+    const coreAlpha = (alphaAt(20, 0) ?? 0) & 0xff;
+    const edgeAlpha = (alphaAt(20, 5) ?? 0) & 0xff;
+
+    expect(edgeAlpha).toBeGreaterThan(0);
+    expect(edgeAlpha).toBeLessThan(coreAlpha);
   });
 
   test("aggregates subpixel branches when rendering zoomed out", () => {

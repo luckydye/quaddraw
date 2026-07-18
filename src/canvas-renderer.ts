@@ -85,6 +85,7 @@ export class CanvasRenderer {
       x: (event.clientX - bounds.left - camera.x) / camera.zoom,
       y: (event.clientY - bounds.top - camera.y) / camera.zoom,
       time: event.timeStamp,
+      pressure: event.pointerType === "pen" ? event.pressure : undefined,
     };
   }
 

@@ -1,8 +1,10 @@
 export type Point = {
   x: number;
   y: number;
-  /** DOM high-resolution timestamp, used to simulate pen pressure from velocity. */
+  /** DOM high-resolution timestamp, used for velocity-derived brush dynamics. */
   time?: number;
+  /** Native stylus pressure from 0 to 1. Undefined for mouse and touch input. */
+  pressure?: number;
   /** Smoothed velocity-derived brush width at this input sample. */
   strength?: number;
 };
@@ -21,6 +23,7 @@ export type Camera = {
 };
 
 export type Tool = "pen" | "eraser" | "hand";
+export type BrushTexture = "solid" | "charcoal";
 
 /** Ephemeral pointer input. It is never rendered or persisted as a path. */
 export type BrushAction = {
@@ -30,6 +33,9 @@ export type BrushAction = {
   width: number;
   /** Brush pigment density, expressed as a normalized opacity from 0 to 1. */
   density: number;
+  texture: BrushTexture;
+  /** Keeps procedural grain stable for the lifetime of this gesture. */
+  textureSeed: number;
   /** Number of transient input intervals already baked into the quadtree. */
   rasterizedSegments: number;
 };

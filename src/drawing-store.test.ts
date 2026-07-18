@@ -60,3 +60,21 @@ describe("DrawingStore brush density", () => {
     expect(cells[0].color & 0xff).toBe(64);
   });
 });
+
+describe("DrawingStore stylus pressure", () => {
+  test("samples pressure changes even while the pen is stationary", () => {
+    const store = new DrawingStore();
+    const action = store.createStroke(
+      { x: 0, y: 0, time: 0, pressure: 0.1 },
+      "#393b42",
+      10,
+    );
+    store.appendPoint(action, { x: 20, y: 0, time: 10, pressure: 0.1 });
+    const lightWidth = action.points[action.points.length - 1].strength!;
+
+    store.appendPoint(action, { x: 20, y: 0, time: 20, pressure: 0.8 });
+
+    expect(action.points).toHaveLength(3);
+    expect(action.points[action.points.length - 1].strength!).toBeGreaterThan(lightWidth);
+  });
+});

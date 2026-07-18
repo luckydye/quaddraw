@@ -1,4 +1,4 @@
-import type { Bounds, Point, QuadDebugRegion, RasterCell } from "./types";
+import type { Bounds, BrushTexture, Point, QuadDebugRegion, RasterCell } from "./types";
 
 export type QuadLeafNode = { readonly color: number; readonly children?: undefined };
 export type QuadBranchNode = {
@@ -12,6 +12,10 @@ export type QuadNode = QuadLeafNode | QuadBranchNode;
 const TRANSPARENT = 0;
 const MAX_DEPTH = 15;
 const MAX_LOD_CELL_PIXELS = 1.25;
+const CHARCOAL_RADIUS_VARIATION_MAX = 1.04;
+const CHARCOAL_FEATHER_FACTOR = 0.32;
+const CHARCOAL_FEATHER_MINIMUM = 1.25;
+const CHARCOAL_FEATHER_OUTSET = 0.45;
 
 /**
  * A persistent sparse raster. Every uniform region is one node; brush edges
@@ -32,6 +36,9 @@ export class RasterQuadTree {
     color: string,
     erase = false,
     density = 1,
+    texture: BrushTexture = "solid",
+    textureSeed = 0,
+    endDensity = density,
   ): RasterQuadTree {
     const paintColor = colorFromHex(color);
     const startRadius = Math.max(startWidth / 2, 0.5);
@@ -47,6 +54,9 @@ export class RasterQuadTree {
       paintColor,
       erase,
       clamp(density, 0, 1),
+      clamp(endDensity, 0, 1),
+      texture,
+      textureSeed,
     );
     return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
@@ -128,9 +138,16 @@ function paintNode(
   endRadius: number,
   paintColor: number,
   erase: boolean,
-  density: number,
+  startDensity: number,
+  endDensity: number,
+  texture: BrushTexture,
+  textureSeed: number,
 ): QuadNode {
-  const maximumRadius = Math.max(startRadius, endRadius);
+  const maximumBaseRadius = Math.max(startRadius, endRadius);
+  const maximumRadius = texture === "charcoal"
+    ? maximumBaseRadius * CHARCOAL_RADIUS_VARIATION_MAX
+      + charcoalFeatherWidth(maximumBaseRadius) * CHARCOAL_FEATHER_OUTSET
+    : maximumBaseRadius;
   const minimumDistance = Math.sqrt(distanceSquaredSegmentToRect(start, end, bounds));
   if (minimumDistance > maximumRadius + 0.5) {
     return node;
@@ -138,13 +155,17 @@ function paintNode(
 
   const maximumDistance = maximumCornerDistance(start, end, bounds);
   const minimumRadius = Math.min(startRadius, endRadius);
-  if (maximumDistance <= Math.max(0, minimumRadius - 0.5)) {
-    if (erase || density === 1) {
+  if (
+    texture === "solid"
+    && startDensity === endDensity
+    && maximumDistance <= Math.max(0, minimumRadius - 0.5)
+  ) {
+    if (erase || startDensity === 1) {
       const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
       return node.color === replacement ? node : uniform(replacement);
     }
     if (!isBranchNode(node)) {
-      const replacement = composite(node.color, paintColor, density, false);
+      const replacement = composite(node.color, paintColor, startDensity, false);
       return node.color === replacement ? node : uniform(replacement);
     }
   }
@@ -153,11 +174,31 @@ function paintNode(
     const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
     const distance = Math.sqrt(distanceSquaredToSegment(center, start, end));
     const amount = segmentAmount(center, start, end);
-    const localRadius = startRadius + (endRadius - startRadius) * amount;
-    const coverage = clamp(localRadius + 0.5 - distance, 0, 1);
+    const isDot = start.x === end.x && start.y === end.y;
+    const localRadius = isDot
+      ? Math.max(startRadius, endRadius)
+      : startRadius + (endRadius - startRadius) * amount;
+    const localDensity = isDot
+      ? Math.max(startDensity, endDensity)
+      : startDensity + (endDensity - startDensity) * amount;
+    const texturedRadius = texture === "charcoal"
+      ? localRadius * (0.8 + smoothNoise(center, textureSeed ^ 0x51ed270b, 0.24) * 0.24)
+      : localRadius;
+    const featherWidth = texture === "charcoal" ? charcoalFeatherWidth(localRadius) : 0;
+    const coverage = texture === "charcoal"
+      ? smoothstep(clamp(
+        (texturedRadius
+          + featherWidth * CHARCOAL_FEATHER_OUTSET
+          + 0.5
+          - distance) / featherWidth,
+        0,
+        1,
+      ))
+      : clamp(texturedRadius + 0.5 - distance, 0, 1);
     if (coverage === 0) return node;
     const currentColor = node.color ?? representativeColor(node);
-    const nextColor = composite(currentColor, paintColor, coverage * density, erase);
+    const texturedCoverage = coverage * localDensity * textureCoverage(texture, center, textureSeed);
+    const nextColor = composite(currentColor, paintColor, texturedCoverage, erase);
     return nextColor === currentColor ? node : uniform(nextColor);
   }
 
@@ -174,7 +215,10 @@ function paintNode(
       endRadius,
       paintColor,
       erase,
-      density,
+      startDensity,
+      endDensity,
+      texture,
+      textureSeed,
     )
   ) as [QuadNode, QuadNode, QuadNode, QuadNode];
 
@@ -190,6 +234,71 @@ function paintNode(
   return createBranchNode(children);
 }
 
+function textureCoverage(texture: BrushTexture, point: Point, seed: number): number {
+  if (texture === "solid") return 1;
+
+  const broad = smoothNoise(point, seed ^ 0x1b873593, 0.09);
+  const grain = smoothNoise(point, seed, 0.52);
+  const tooth = spatialNoise(point, seed ^ 0x2c1b3c6d, 1.7);
+  return clamp(
+    0.56 + broad * 0.34 + (grain - 0.5) * 0.3 + (tooth - 0.5) * 0.12,
+    0.32,
+    0.98,
+  );
+}
+
+function charcoalFeatherWidth(radius: number): number {
+  return Math.max(CHARCOAL_FEATHER_MINIMUM, radius * CHARCOAL_FEATHER_FACTOR);
+}
+
+function smoothNoise(point: Point, seed: number, scale: number): number {
+  const scaledX = point.x * scale;
+  const scaledY = point.y * scale;
+  const x = Math.floor(scaledX);
+  const y = Math.floor(scaledY);
+  const amountX = smoothstep(scaledX - x);
+  const amountY = smoothstep(scaledY - y);
+  const top = interpolateNoise(
+    latticeNoise(x, y, seed),
+    latticeNoise(x + 1, y, seed),
+    amountX,
+  );
+  const bottom = interpolateNoise(
+    latticeNoise(x, y + 1, seed),
+    latticeNoise(x + 1, y + 1, seed),
+    amountX,
+  );
+  return interpolateNoise(top, bottom, amountY);
+}
+
+function spatialNoise(point: Point, seed: number, scale: number): number {
+  const x = Math.floor(point.x * scale);
+  const y = Math.floor(point.y * scale);
+  return latticeNoise(x, y, seed);
+}
+
+function latticeNoise(x: number, y: number, seed: number): number {
+  let value = (
+    Math.imul(x, 0x1f123bb5)
+    ^ Math.imul(y, 0x5f356495)
+    ^ Math.imul(seed, 0x6c8e9cf5)
+  ) >>> 0;
+  value ^= value >>> 15;
+  value = Math.imul(value, 0x2c1b3c6d) >>> 0;
+  value ^= value >>> 12;
+  value = Math.imul(value, 0x297a2d39) >>> 0;
+  value ^= value >>> 15;
+  return (value >>> 0) / 0xffffffff;
+}
+
+function smoothstep(amount: number): number {
+  return amount * amount * (3 - 2 * amount);
+}
+
+function interpolateNoise(start: number, end: number, amount: number): number {
+  return start + (end - start) * amount;
+}
+
 function applyMaskNode(base: QuadNode, mask: QuadNode, paintColor: number, erase: boolean): QuadNode {
   if (!isBranchNode(mask)) {
     const coverage = (mask.color & 0xff) / 255;
@@ -199,7 +308,7 @@ function applyMaskNode(base: QuadNode, mask: QuadNode, paintColor: number, erase
       return base.color === replacement ? base : uniform(replacement);
     }
     if (!isBranchNode(base)) {
-      const replacement = composite(base.color, paintColor, coverage, erase);
+      const replacement = composite(base.color, paintColor, coverage, erase, false);
       return replacement === base.color ? base : uniform(replacement);
     }
   }
@@ -335,18 +444,27 @@ export function createBranchNode(
   return { children, average, nodeCount };
 }
 
-function composite(current: number, paint: number, coverage: number, erase: boolean): number {
+function composite(
+  current: number,
+  paint: number,
+  coverage: number,
+  erase: boolean,
+  unionSameColor = true,
+): number {
   const currentAlpha = (current & 0xff) / 255;
   if (erase) {
     const alpha = Math.round(currentAlpha * (1 - coverage) * 255);
     return alpha === 0 ? TRANSPARENT : withAlpha(current, alpha);
   }
 
-  // Adjacent flattened curve sections overlap at their round caps. Repeated
-  // source-over blending would accumulate alpha there and expose a chain of
-  // circles. Same-color paint represents one coverage mask, so union it by
-  // taking the strongest coverage instead.
-  if ((current & 0xffffff00) === (paint & 0xffffff00) && currentAlpha > 0) {
+  // Segments within one gesture build a coverage mask, so their overlap is a
+  // union. Applying that completed mask to prior strokes uses source-over,
+  // including when both strokes share the same color.
+  if (
+    unionSameColor
+    && (current & 0xffffff00) === (paint & 0xffffff00)
+    && currentAlpha > 0
+  ) {
     const alpha = Math.max(current & 0xff, Math.round(coverage * 255));
     return withAlpha(paint, alpha);
   }
