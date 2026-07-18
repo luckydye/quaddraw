@@ -218,33 +218,43 @@ export class CanvasRenderer {
     // flight. Ignore that bitmap so it cannot overwrite the patched stroke.
     this.renderRequestId += 1;
     this.pendingWorkerRender = null;
-    this.committedTreeContext.save();
-    this.committedTreeContext.translate(
-      this.committedCamera.x + this.cacheMarginX,
-      this.committedCamera.y + this.cacheMarginY,
-    );
-    this.committedTreeContext.scale(this.committedCamera.zoom, this.committedCamera.zoom);
     for (const { cells, debugRegions, worldBounds } of regions) {
+      const patch = this.committedDevicePixelPatch(worldBounds);
+      if (!patch) continue;
+
       this.committedTreeContext.save();
+      // Incremental world-space clips usually land between device pixels. The
+      // partially covered pixels at those edges survive as pale rectangles
+      // after many live brush updates. Define the replacement clip in physical
+      // canvas pixels so its edge is hard, then restore the world transform for
+      // rasterizing the cells inside it.
+      this.committedTreeContext.setTransform(1, 0, 0, 1, 0, 0);
       this.committedTreeContext.clearRect(
-        worldBounds.x,
-        worldBounds.y,
-        worldBounds.width,
-        worldBounds.height,
+        patch.x,
+        patch.y,
+        patch.width,
+        patch.height,
       );
       this.committedTreeContext.beginPath();
       this.committedTreeContext.rect(
-        worldBounds.x,
-        worldBounds.y,
-        worldBounds.width,
-        worldBounds.height,
+        patch.x,
+        patch.y,
+        patch.width,
+        patch.height,
       );
       this.committedTreeContext.clip();
+      this.committedTreeContext.setTransform(
+        this.pixelScale * this.committedCamera.zoom,
+        0,
+        0,
+        this.pixelScale * this.committedCamera.zoom,
+        this.pixelScale * (this.committedCamera.x + this.cacheMarginX),
+        this.pixelScale * (this.committedCamera.y + this.cacheMarginY),
+      );
       this.drawCells(cells, this.committedTreeContext);
       this.drawDebugRegions(debugRegions, this.committedTreeContext, this.committedCamera.zoom);
       this.committedTreeContext.restore();
     }
-    this.committedTreeContext.restore();
     for (const { debugRegions } of regions) {
       if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
     }
@@ -260,6 +270,31 @@ export class CanvasRenderer {
       selectionOffset,
     );
     return true;
+  }
+
+  /** Returns the wholly covered physical pixels inside a world-space patch. */
+  private committedDevicePixelPatch(worldBounds: Bounds): Bounds | null {
+    const zoom = this.committedCamera.zoom;
+    const offsetX = this.committedCamera.x + this.cacheMarginX;
+    const offsetY = this.committedCamera.y + this.cacheMarginY;
+    const left = Math.max(
+      0,
+      Math.ceil((worldBounds.x * zoom + offsetX) * this.pixelScale),
+    );
+    const top = Math.max(
+      0,
+      Math.ceil((worldBounds.y * zoom + offsetY) * this.pixelScale),
+    );
+    const right = Math.min(
+      this.committedTreeCanvas.width,
+      Math.floor(((worldBounds.x + worldBounds.width) * zoom + offsetX) * this.pixelScale),
+    );
+    const bottom = Math.min(
+      this.committedTreeCanvas.height,
+      Math.floor(((worldBounds.y + worldBounds.height) * zoom + offsetY) * this.pixelScale),
+    );
+    if (right <= left || bottom <= top) return null;
+    return { x: left, y: top, width: right - left, height: bottom - top };
   }
 
   /** Queues a committed-cache rasterization without blocking the UI thread. */
