@@ -52,14 +52,16 @@ describe("brush texture masks", () => {
     expect(repeated).toBeCloseTo(first, 12);
   });
 
-  test("lower texture density removes weak contact without fading strong contact", () => {
-    expect(texturedContactCoverage(1, 0.2)).toBe(1);
-    expect(texturedContactCoverage(0.9, 0.2)).toBeCloseTo(0.9 ** 5, 12);
+  test("lower texture density lightens pigment and emphasizes its texture", () => {
+    expect(texturedContactCoverage(1, 0.2)).toBeCloseTo(Math.sqrt(0.2), 12);
+    expect(texturedContactCoverage(0.9, 0.2)).toBeCloseTo(0.9 ** 5 * Math.sqrt(0.2), 12);
+    expect(texturedContactCoverage(1, 0.2, 0)).toBeGreaterThan(0);
+    expect(texturedContactCoverage(1, 0.2, 0)).toBeLessThan(texturedContactCoverage(1, 0.2, 1));
     expect(texturedContactCoverage(0.5, 0.2)).toBeGreaterThan(0);
     expect(texturedContactCoverage(0.9, 1)).toBe(0.9);
   });
 
-  test("a low-density bristle stamp is sparse but retains opaque pigment", () => {
+  test("a low-density bristle stamp stays continuous but carries less pigment", () => {
     const bounds = { x: -64, y: -64, width: 128, height: 128 };
     const stamp = (density: number) => new RasterQuadTree(bounds).paintSegment(
       { x: 0, y: 0 },
@@ -79,7 +81,8 @@ describe("brush texture masks", () => {
     const light = stamp(0.25);
     const full = stamp(1);
     expect(pigment(light)).toBeLessThan(pigment(full) * 0.75);
-    expect(Math.max(...light.allCells().map(({ color }) => color & 0xff))).toBeGreaterThan(245);
+    expect(Math.max(...light.allCells().map(({ color }) => color & 0xff))).toBeGreaterThan(115);
+    expect(Math.max(...light.allCells().map(({ color }) => color & 0xff))).toBeLessThan(140);
   });
 
   test("charcoal keeps its procedural grain coverage", () => {

@@ -475,9 +475,11 @@ function paintNode(
 type BristleStamp = {
   center: Point;
   direction: Point;
+  gestureDistance: number;
   width: number;
   density: number;
   seed: number;
+  textureSeed: number;
 };
 
 const BRISTLE_STAMP_SPACING = 0.12;
@@ -505,9 +507,11 @@ function createBristleStamps(
     return [{
       center: start,
       direction: { x: Math.cos(angle), y: Math.sin(angle) },
+      gestureDistance: textureOffset,
       width: Math.max(startWidth, endWidth, 1),
       density: Math.max(startDensity, endDensity),
       seed,
+      textureSeed: seed,
     }];
   }
 
@@ -522,9 +526,11 @@ function createBristleStamps(
     stamps.push({
       center: { x: start.x + dx * amount, y: start.y + dy * amount },
       direction,
+      gestureDistance: textureOffset + distance,
       width: Math.max(startWidth + (endWidth - startWidth) * amount, 1),
       density: startDensity + (endDensity - startDensity) * amount,
       seed: seed ^ Math.imul(stampIndex, 0x9e3779b1),
+      textureSeed: seed,
     });
     distance += spacing;
   }
@@ -570,12 +576,18 @@ function paintBristleStamps(
       const relativeY = point.y - stamp.center.y;
       const along = relativeX * stamp.direction.x + relativeY * stamp.direction.y;
       const across = relativeY * stamp.direction.x - relativeX * stamp.direction.y;
+      const loadVariation = bristleLoadVariation(
+        stamp.gestureDistance + along,
+        across,
+        stamp.width,
+        stamp.textureSeed,
+      );
       const stampCoverage = texturedContactCoverage(sampleBrushTip(
         "bristle",
         0.5 + along / (stamp.width * BRISTLE_STAMP_ASPECT),
         0.5 + across / stamp.width,
         stamp.seed,
-      ), stamp.density);
+      ), stamp.density, loadVariation);
       coverage = Math.max(coverage, stampCoverage);
       if (coverage >= 1) break;
     }
@@ -602,6 +614,28 @@ function paintBristleStamps(
     return uniform(firstColor);
   }
   return createBranchNode(children);
+}
+
+/** Continuous, direction-aligned pigment loading; never punches out holes. */
+function bristleLoadVariation(
+  along: number,
+  across: number,
+  brushWidth: number,
+  seed: number,
+): number {
+  const alongSize = Math.max(10, brushWidth * 0.7);
+  const acrossSize = Math.max(1.75, brushWidth * 0.08);
+  const strands = smoothNoise(
+    { x: along / alongSize, y: across / acrossSize },
+    seed ^ 0x85ebca6b,
+    1,
+  );
+  const loading = smoothNoise(
+    { x: along / (alongSize * 0.4), y: across / (acrossSize * 2.4) },
+    seed ^ 0xc2b2ae35,
+    1,
+  );
+  return clamp((strands * 0.78 + loading * 0.22 - 0.5) * 1.7 + 0.5, 0, 1);
 }
 
 function bristleTextureCoverage(

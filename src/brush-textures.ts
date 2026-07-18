@@ -48,14 +48,18 @@ export function sampleBrushTip(
 export function texturedContactCoverage(
   maskCoverage: number,
   density: number,
+  loadVariation = 1,
 ): number {
   const normalizedDensity = clamp(density, 0, 1);
   if (normalizedDensity === 0 || maskCoverage <= 0) return 0;
   if (normalizedDensity === 1) return clamp(maskCoverage, 0, 1);
-  // A lightly loaded brush keeps its complete tip impression, but its weaker
-  // texture values fall away faster than its strongest bristles. This changes
-  // texture contrast instead of uniformly fading or punching binary holes.
-  return clamp(maskCoverage, 0, 1) ** (1 / normalizedDensity);
+  // A lightly loaded brush keeps its complete tip impression, while carrying
+  // less pigment and losing weak texture faster than strong bristles. The
+  // result is lighter and more textured, not a uniformly faded solid shape.
+  const texturedCoverage = clamp(maskCoverage, 0, 1) ** (1 / normalizedDensity);
+  const loadedBristles = 0.2 + clamp(loadVariation, 0, 1) * 0.8;
+  const variation = normalizedDensity + (1 - normalizedDensity) * loadedBristles;
+  return texturedCoverage * Math.sqrt(normalizedDensity) * variation;
 }
 
 function sampleBristleMask(horizontal: number, vertical: number): number {

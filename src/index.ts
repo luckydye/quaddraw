@@ -19,7 +19,7 @@ import type {
 } from "./types";
 
 const ZOOM_MIN = 0.2;
-const ZOOM_MAX = 4;
+const ZOOM_MAX = 16;
 const ZOOM_BUTTON_FACTOR = 1.2;
 const PINCH_ZOOM_SENSITIVITY = 0.01;
 const MAX_WHEEL_DELTA = 120;
