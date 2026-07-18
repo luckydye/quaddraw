@@ -77,6 +77,25 @@ describe("DrawingStore stylus pressure", () => {
     expect(action.points).toHaveLength(3);
     expect(action.points[action.points.length - 1].strength!).toBeGreaterThan(lightWidth);
   });
+
+  test("dynamics can disable velocity and pressure thickness changes", () => {
+    const store = new DrawingStore();
+    const action = store.createStroke(
+      { x: 0, y: 0, time: 0, pressure: 0.1 },
+      "#393b42",
+      10,
+      1,
+      "solid",
+      0,
+      0,
+    );
+
+    store.appendPoint(action, { x: 20, y: 0, time: 100, pressure: 0.1 });
+    store.appendPoint(action, { x: 40, y: 0, time: 101, pressure: 1 });
+
+    expect(action.dynamics).toBe(0);
+    expect(action.points.every((point) => point.strength === action.width)).toBe(true);
+  });
 });
 
 describe("DrawingStore selection movement", () => {
@@ -97,6 +116,8 @@ describe("DrawingStore selection movement", () => {
       const movedSelection = store.moveSelection(selection, offset.x, offset.y);
 
       expect(movedSelection).not.toBeNull();
+      expect(movedSelection!.cells.length).toBeGreaterThan(0);
+      expect(Number.isFinite(movedSelection!.bounds.x)).toBe(true);
       expect(store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })).toBeNull();
       expect(store.undo()).toBe(true);
       expect(store.selectConnectedIslands({ x: -5, y: -5, width: 10, height: 10 })).not.toBeNull();

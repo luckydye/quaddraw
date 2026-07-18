@@ -63,19 +63,31 @@ button {
     border-radius: 7px;
     display: grid;
     place-items: center;
-    font-size: 21px;
     color: #66666d;
     transition: 0.12s ease;
 }
+.tool-icon {
+    width: 21px;
+    height: 21px;
+    display: block;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
 .tool:hover {
     background: #f2f2f5;
+    color: #45454c;
+}
+.tool:focus-visible {
+    outline: 2px solid #5d5cca66;
+    outline-offset: -2px;
 }
 .tool.active {
     background: #e8e8f9;
     color: #5d5cca;
-}
-.tool.active .cursor-icon {
-    transform: translate(-1px, -1px);
 }
 .toolbar-rule {
     width: 1px;

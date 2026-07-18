@@ -190,7 +190,33 @@ export class RasterQuadTree {
 
   /** Cuts selected leaves and composites their colors at a translated position. */
   moveCells(cells: readonly RasterSelectionCell[], x: number, y: number): RasterQuadTree {
-    if (cells.length === 0 || (x === 0 && y === 0)) return this;
+    return this.moveCellsWithSelection(cells, x, y).tree;
+  }
+
+  /** Moves many leaves as one translated tree and returns their new leaf addresses. */
+  moveSelection(selection: RasterSelection, x: number, y: number): {
+    tree: RasterQuadTree;
+    selection: RasterSelection;
+  } {
+    const moved = this.moveCellsWithSelection(selection.cells, x, y);
+    return {
+      tree: moved.tree,
+      selection: {
+        cells: moved.cells,
+        bounds: enclosingBounds(moved.cells),
+        islandCount: selection.islandCount,
+      },
+    };
+  }
+
+  private moveCellsWithSelection(
+    cells: readonly RasterSelectionCell[],
+    x: number,
+    y: number,
+  ): { tree: RasterQuadTree; cells: RasterSelectionCell[] } {
+    if (cells.length === 0 || (x === 0 && y === 0)) {
+      return { tree: this, cells: [...cells] };
+    }
     const selectedAddresses = new Set<number>();
     const affectedBranches = new Set<number>();
     for (const cell of cells) {
@@ -199,28 +225,30 @@ export class RasterQuadTree {
         affectedBranches.add(address);
       }
     }
-    let nextRoot = removeSelectedCells(
+    const remainingRoot = removeSelectedCells(
       this.root,
       this.bounds,
       selectedAddresses,
       affectedBranches,
       1,
     );
-    for (const cell of cells) {
-      nextRoot = compositeRectangle(
-        nextRoot,
-        this.bounds,
-        0,
-        {
-          x: cell.bounds.x + x,
-          y: cell.bounds.y + y,
-          width: cell.bounds.width,
-          height: cell.bounds.height,
-        },
-        cell.color,
-      );
-    }
-    return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
+    const translatedCells = cells.map((cell) => ({
+      bounds: {
+        x: cell.bounds.x + x,
+        y: cell.bounds.y + y,
+        width: cell.bounds.width,
+        height: cell.bounds.height,
+      },
+      color: cell.color,
+    }));
+    const movedRoot = buildCellTree(translatedCells, this.bounds, 0);
+    const nextRoot = compositeSourceTree(remainingRoot, movedRoot);
+    const movedCells: RasterSelectionCell[] = [];
+    collectCellsOverlappingMask(nextRoot, movedRoot, this.bounds, 1, movedCells);
+    return {
+      tree: nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot),
+      cells: movedCells,
+    };
   }
 
   debugLeavesIn(area: Bounds, scale = 1): QuadDebugRegion[] {
@@ -817,38 +845,77 @@ function removeSelectedCells(
   return collapsedNode(children);
 }
 
-function compositeRectangle(
-  node: QuadNode,
+function buildCellTree(
+  cells: readonly RasterCell[],
   bounds: Bounds,
   depth: number,
-  rectangle: Bounds,
-  sourceColor: number,
 ): QuadNode {
-  if (!rectanglesIntersect(bounds, rectangle)) return node;
-  const fullyCovered = rectangleContains(rectangle, bounds);
-  if (fullyCovered && (sourceColor & 0xff) === 255) return uniform(sourceColor);
-  if (fullyCovered && !isBranchNode(node)) {
-    const nextColor = composite(node.color, sourceColor, (sourceColor & 0xff) / 255, false, false);
-    return nextColor === node.color ? node : uniform(nextColor);
-  }
+  if (cells.length === 0) return uniform(TRANSPARENT);
+  const coveringCell = cells.find((cell) => rectangleContains(cell.bounds, bounds));
+  if (coveringCell) return uniform(coveringCell.color);
   if (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1)) {
-    const nextColor = composite(
-      representativeColor(node),
-      sourceColor,
-      (sourceColor & 0xff) / 255,
-      false,
-      false,
-    );
-    return uniform(nextColor);
+    const cell = cells.find((candidate) => rectanglesIntersect(candidate.bounds, bounds));
+    return uniform(cell?.color ?? TRANSPARENT);
   }
 
   const childBounds = splitBounds(bounds);
-  const oldChildren = node.children ?? [node, node, node, node];
-  const children = oldChildren.map((child, index) =>
-    compositeRectangle(child, childBounds[index], depth + 1, rectangle, sourceColor)
+  const cellsByChild: RasterCell[][] = [[], [], [], []];
+  for (const cell of cells) {
+    for (let index = 0; index < childBounds.length; index++) {
+      if (rectanglesIntersect(cell.bounds, childBounds[index])) cellsByChild[index].push(cell);
+    }
+  }
+  return collapsedNode(childBounds.map((child, index) =>
+    buildCellTree(cellsByChild[index], child, depth + 1)
+  ) as [QuadNode, QuadNode, QuadNode, QuadNode]);
+}
+
+function compositeSourceTree(base: QuadNode, source: QuadNode): QuadNode {
+  if (!isBranchNode(source)) {
+    const sourceAlpha = source.color & 0xff;
+    if (sourceAlpha === 0) return base;
+    if (sourceAlpha === 255) return source;
+    if (!isBranchNode(base)) {
+      return uniform(composite(base.color, source.color, sourceAlpha / 255, false, false));
+    }
+  }
+  if (!isBranchNode(base) && (base.color & 0xff) === 0) return source;
+
+  const baseChildren = base.children ?? [base, base, base, base];
+  const sourceChildren = source.children ?? [source, source, source, source];
+  const children = baseChildren.map((child, index) =>
+    compositeSourceTree(child, sourceChildren[index])
   ) as [QuadNode, QuadNode, QuadNode, QuadNode];
-  if (children.every((child, index) => child === oldChildren[index])) return node;
-  return collapsedNode(children);
+  if (children.every((child, index) => child === baseChildren[index])) return base;
+  // Keep a source branch even when equal colors could collapse it. The mask
+  // boundary is also the addressable boundary of the moved selection.
+  return isBranchNode(source) ? createBranchNode(children) : collapsedNode(children);
+}
+
+function collectCellsOverlappingMask(
+  node: QuadNode,
+  mask: QuadNode,
+  bounds: Bounds,
+  address: number,
+  cells: RasterSelectionCell[],
+): void {
+  if (!isBranchNode(mask) && (mask.color & 0xff) === 0) return;
+  if (!isBranchNode(node)) {
+    if ((node.color & 0xff) !== 0) cells.push({ bounds, color: node.color, address });
+    return;
+  }
+
+  const childBounds = splitBounds(bounds);
+  const maskChildren = mask.children ?? [mask, mask, mask, mask];
+  node.children.forEach((child, index) =>
+    collectCellsOverlappingMask(
+      child,
+      maskChildren[index],
+      childBounds[index],
+      address * 4 + index,
+      cells,
+    )
+  );
 }
 
 function rectangleContains(container: Bounds, contained: Bounds): boolean {

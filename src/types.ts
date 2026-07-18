@@ -5,7 +5,7 @@ export type Point = {
   time?: number;
   /** Native stylus pressure from 0 to 1. Undefined for mouse and touch input. */
   pressure?: number;
-  /** Smoothed velocity-derived brush width at this input sample. */
+  /** Smoothed velocity- and pressure-adjusted brush width at this input sample. */
   strength?: number;
 };
 
@@ -31,6 +31,8 @@ export type BrushAction = {
   points: Point[];
   color: string;
   width: number;
+  /** How strongly velocity and pressure affect stroke thickness, from 0 to 1. */
+  dynamics: number;
   /** Brush pigment density, expressed as a normalized opacity from 0 to 1. */
   density: number;
   texture: BrushTexture;

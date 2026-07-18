@@ -19,6 +19,7 @@ import type {
 const MINIMAP_SCALE = 0.012;
 const OVERVIEW_SCALE = 0.08;
 const CACHE_MARGIN_FACTOR = 0.2;
+const SELECTION_HIGHLIGHT_CELL_LIMIT = 20_000;
 
 /** Renders colored quadtree regions without reconstructing vector paths. */
 export class CanvasRenderer {
@@ -30,6 +31,10 @@ export class CanvasRenderer {
   private readonly committedTreeContext: CanvasRenderingContext2D;
   private readonly treeCanvas = document.createElement("canvas");
   private readonly treeContext: CanvasRenderingContext2D;
+  private readonly selectionMaskCanvas = document.createElement("canvas");
+  private readonly selectionMaskContext: CanvasRenderingContext2D;
+  private readonly selectionPreviewCanvas = document.createElement("canvas");
+  private readonly selectionPreviewContext: CanvasRenderingContext2D;
   private readonly minimapContext: CanvasRenderingContext2D;
   private committedCamera: Camera = { x: 0, y: 0, zoom: 1 };
   private committedWorldBounds: Bounds | null = null;
@@ -40,6 +45,10 @@ export class CanvasRenderer {
   private pixelScale = 1;
   private renderWorker: Worker | null = null;
   private renderRequestId = 0;
+  private pathSelection: RasterSelection | null = null;
+  private pathSelectionValue: Path2D | null = null;
+  private previewSelection: RasterSelection | null = null;
+  private previewCamera: Camera | null = null;
   private pendingWorkerRender: {
     id: number;
     camera: Camera;
@@ -57,6 +66,8 @@ export class CanvasRenderer {
     this.overviewContext = this.overviewCanvas.getContext("2d")!;
     this.committedTreeContext = this.committedTreeCanvas.getContext("2d")!;
     this.treeContext = this.treeCanvas.getContext("2d")!;
+    this.selectionMaskContext = this.selectionMaskCanvas.getContext("2d")!;
+    this.selectionPreviewContext = this.selectionPreviewCanvas.getContext("2d")!;
     this.minimapContext = minimap.getContext("2d")!;
     this.overviewCanvas.width = Math.ceil(WORLD_BOUNDS.width * OVERVIEW_SCALE);
     this.overviewCanvas.height = Math.ceil(WORLD_BOUNDS.height * OVERVIEW_SCALE);
@@ -80,6 +91,12 @@ export class CanvasRenderer {
     this.treeCanvas.width = bounds.width * scale;
     this.treeCanvas.height = bounds.height * scale;
     this.treeContext.setTransform(scale, 0, 0, scale, 0, 0);
+    this.selectionMaskCanvas.width = this.treeCanvas.width;
+    this.selectionMaskCanvas.height = this.treeCanvas.height;
+    this.selectionPreviewCanvas.width = this.treeCanvas.width;
+    this.selectionPreviewCanvas.height = this.treeCanvas.height;
+    this.previewSelection = null;
+    this.previewCamera = null;
     this.committedWorldBounds = null;
     this.renderRequestId += 1;
     this.pendingWorkerRender = null;
@@ -107,6 +124,8 @@ export class CanvasRenderer {
   ): void {
     const viewport = this.area.getBoundingClientRect();
     if (redrawTree) {
+      this.previewSelection = null;
+      this.previewCamera = null;
       this.renderRequestId += 1;
       this.pendingWorkerRender = null;
       this.committedTreeContext.clearRect(0, 0, this.cacheWidth, this.cacheHeight);
@@ -303,25 +322,30 @@ export class CanvasRenderer {
     if (!selection && !marquee) return;
     const isMoving = selection !== null
       && (selectionOffset.x !== 0 || selectionOffset.y !== 0);
+    const selectionPath = selection && (
+      isMoving || selection.cells.length <= SELECTION_HIGHLIGHT_CELL_LIMIT
+    ) ? this.pathForSelection(selection) : null;
 
-    if (selection && isMoving) {
-      // Cut the selected occupied leaves out of the cached image for the live
-      // preview so the canvas background shows underneath them.
+    if (selection && selectionPath && isMoving) {
+      this.prepareSelectionPreview(selection, selectionPath, camera, viewport);
       this.context.save();
-      this.context.translate(camera.x, camera.y);
-      this.context.scale(camera.zoom, camera.zoom);
-      this.addCellsToPath(selection.cells, this.context);
       this.context.globalCompositeOperation = "destination-out";
-      this.context.fillStyle = "#000";
-      this.context.fill();
+      this.context.drawImage(
+        this.selectionMaskCanvas,
+        0,
+        0,
+        viewport.width,
+        viewport.height,
+      );
       this.context.restore();
 
-      this.context.save();
-      this.context.translate(camera.x, camera.y);
-      this.context.scale(camera.zoom, camera.zoom);
-      this.context.translate(selectionOffset.x, selectionOffset.y);
-      this.drawCells(selection.cells, this.context);
-      this.context.restore();
+      this.context.drawImage(
+        this.selectionPreviewCanvas,
+        selectionOffset.x * camera.zoom,
+        selectionOffset.y * camera.zoom,
+        viewport.width,
+        viewport.height,
+      );
     }
 
     this.context.save();
@@ -331,9 +355,10 @@ export class CanvasRenderer {
     if (selection) {
       this.context.save();
       this.context.translate(selectionOffset.x, selectionOffset.y);
-      this.addCellsToPath(selection.cells, this.context);
-      this.context.fillStyle = "rgb(91 93 209 / 0.22)";
-      this.context.fill();
+      if (!isMoving && selectionPath) {
+        this.context.fillStyle = "rgb(91 93 209 / 0.22)";
+        this.context.fill(selectionPath);
+      }
       this.context.strokeStyle = "rgb(75 77 196 / 0.9)";
       this.context.lineWidth = 1 / camera.zoom;
       this.context.setLineDash([5 / camera.zoom, 4 / camera.zoom]);
@@ -358,14 +383,64 @@ export class CanvasRenderer {
     this.context.restore();
   }
 
-  private addCellsToPath(
-    cells: readonly RasterCell[],
-    context: CanvasRenderingContext2D,
-  ): void {
-    context.beginPath();
-    for (const cell of cells) {
-      context.rect(cell.bounds.x, cell.bounds.y, cell.bounds.width, cell.bounds.height);
+  private pathForSelection(selection: RasterSelection): Path2D {
+    if (selection === this.pathSelection && this.pathSelectionValue) {
+      return this.pathSelectionValue;
     }
+    const path = new Path2D();
+    for (const cell of selection.cells) {
+      path.rect(cell.bounds.x, cell.bounds.y, cell.bounds.width, cell.bounds.height);
+    }
+    this.pathSelection = selection;
+    this.pathSelectionValue = path;
+    return path;
+  }
+
+  private prepareSelectionPreview(
+    selection: RasterSelection,
+    path: Path2D,
+    camera: Camera,
+    viewport: DOMRect,
+  ): void {
+    if (
+      selection === this.previewSelection
+      && this.previewCamera?.x === camera.x
+      && this.previewCamera.y === camera.y
+      && this.previewCamera.zoom === camera.zoom
+    ) return;
+
+    this.selectionMaskContext.setTransform(this.pixelScale, 0, 0, this.pixelScale, 0, 0);
+    this.selectionMaskContext.clearRect(0, 0, viewport.width, viewport.height);
+    this.selectionMaskContext.save();
+    this.selectionMaskContext.translate(camera.x, camera.y);
+    this.selectionMaskContext.scale(camera.zoom, camera.zoom);
+    this.selectionMaskContext.fillStyle = "#000";
+    this.selectionMaskContext.fill(path);
+    this.selectionMaskContext.restore();
+
+    this.selectionPreviewContext.setTransform(this.pixelScale, 0, 0, this.pixelScale, 0, 0);
+    this.selectionPreviewContext.clearRect(0, 0, viewport.width, viewport.height);
+    this.selectionPreviewContext.drawImage(
+      this.treeCanvas,
+      0,
+      0,
+      viewport.width,
+      viewport.height,
+    );
+    this.selectionPreviewContext.globalCompositeOperation = "destination-in";
+    this.selectionPreviewContext.drawImage(
+      this.selectionMaskCanvas,
+      0,
+      0,
+      viewport.width,
+      viewport.height,
+    );
+    this.selectionPreviewContext.globalCompositeOperation = "source-atop";
+    this.selectionPreviewContext.fillStyle = "rgb(91 93 209 / 0.22)";
+    this.selectionPreviewContext.fillRect(0, 0, viewport.width, viewport.height);
+    this.selectionPreviewContext.globalCompositeOperation = "source-over";
+    this.previewSelection = selection;
+    this.previewCamera = { ...camera };
   }
 
   private drawDebugRegions(

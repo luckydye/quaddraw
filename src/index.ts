@@ -33,6 +33,8 @@ const elements = {
   weightValue: requiredElement<HTMLOutputElement>("#weightValue"),
   density: requiredElement<HTMLInputElement>("#density"),
   densityValue: requiredElement<HTMLOutputElement>("#densityValue"),
+  dynamics: requiredElement<HTMLInputElement>("#dynamics"),
+  dynamicsValue: requiredElement<HTMLOutputElement>("#dynamicsValue"),
   brushTexture: requiredElement<HTMLSelectElement>("#brushTexture"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
   debugTree: requiredElement<HTMLButtonElement>("#debugTree"),
@@ -202,6 +204,7 @@ function beginDrawing(point: Point): void {
     Number(elements.density.value) / 100,
     elements.brushTexture.value as BrushTexture,
     nextTextureSeed(),
+    Number(elements.dynamics.value) / 100,
   );
   elements.hint.style.opacity = "0";
   render(true, false);
@@ -384,6 +387,10 @@ function bindControls(): void {
 
   elements.density.addEventListener("input", () => {
     elements.densityValue.textContent = `${elements.density.value}%`;
+  });
+
+  elements.dynamics.addEventListener("input", () => {
+    elements.dynamicsValue.textContent = `${elements.dynamics.value}%`;
   });
 
   document.querySelectorAll<HTMLButtonElement>("#swatches button").forEach((button) => {

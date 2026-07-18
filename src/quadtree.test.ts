@@ -395,4 +395,42 @@ describe("RasterQuadTree", () => {
     expect(moved.connectedIslandsTouching({ x: 145, y: -5, width: 45, height: 10 })).not.toBeNull();
     expect(coverage(movedSelection.cells)).toBeCloseTo(coverage(selection.cells), 6);
   });
+
+  test("returns current leaf addresses so a large selection can move repeatedly", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS)
+      .paintSegment({ x: 0, y: 0 }, { x: 120, y: 20 }, 10, 10, "#8855d4");
+    const selection = tree.connectedIslandsTouching({ x: -6, y: -6, width: 12, height: 12 })!;
+    const firstOffset = tree.snapTranslation(180, 40);
+    const firstMove = tree.moveSelection(selection, firstOffset.x, firstOffset.y);
+    const secondOffset = firstMove.tree.snapTranslation(80, -30);
+
+    const secondMove = firstMove.tree.moveSelection(
+      firstMove.selection,
+      secondOffset.x,
+      secondOffset.y,
+    );
+
+    expect(firstMove.selection.cells.length).toBeGreaterThan(0);
+    expect(secondMove.selection.cells.length).toBeGreaterThan(0);
+    expect(secondMove.tree.connectedIslandsTouching({
+      x: 250,
+      y: 0,
+      width: 150,
+      height: 50,
+    })).not.toBeNull();
+  });
+
+  test("keeps moved selection bounds local when compositing onto the same color", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS)
+      .paintSegment({ x: 0, y: 0 }, { x: 40, y: 0 }, 8, 8, "#393b42")
+      .paintSegment({ x: 200, y: 0 }, { x: 500, y: 0 }, 8, 8, "#393b42");
+    const selection = tree.connectedIslandsTouching({ x: -5, y: -5, width: 10, height: 10 })!;
+    const offset = tree.snapTranslation(200, 0);
+
+    const moved = tree.moveSelection(selection, offset.x, offset.y);
+
+    expect(moved.selection.cells.length).toBeGreaterThan(0);
+    expect(moved.selection.bounds.x).toBeGreaterThan(190);
+    expect(moved.selection.bounds.width).toBeLessThan(60);
+  });
 });

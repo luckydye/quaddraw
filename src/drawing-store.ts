@@ -61,12 +61,13 @@ export class DrawingStore {
     density = 1,
     texture: BrushTexture = "solid",
     textureSeed = 0,
+    dynamics = 1,
   ): BrushAction {
-    return this.createAction("stroke", point, color, width, density, texture, textureSeed);
+    return this.createAction("stroke", point, color, width, density, texture, textureSeed, dynamics);
   }
 
   createEraser(point: Point, width: number): BrushAction {
-    return this.createAction("eraser", point, "#000000", width, 1, "solid", 0);
+    return this.createAction("eraser", point, "#000000", width, 1, "solid", 0, 0);
   }
 
   appendPoint(action: BrushAction, point: Point): void {
@@ -88,9 +89,11 @@ export class DrawingStore {
     }
 
     if (action.kind === "stroke") {
-      const targetWidth = pressureAdjustedWidth(
+      const targetWidth = dynamicsAdjustedWidth(
+        action.width,
         velocityWidth(previousPoint, point, action.width),
         point.pressure,
+        action.dynamics,
       );
       const responseDistance = targetWidth > previousPoint.strength!
         ? WIDTH_GROWTH_DISTANCE
@@ -117,7 +120,12 @@ export class DrawingStore {
     if (action.kind === "stroke" && action.points[0].strength === undefined) {
       if (action.points.length === 1) {
         // A tap never produces a velocity sample, so commit a neutral-width dot.
-        const tapWidth = pressureAdjustedWidth(action.width, action.points[0].pressure);
+        const tapWidth = dynamicsAdjustedWidth(
+          action.width,
+          action.width,
+          action.points[0].pressure,
+          action.dynamics,
+        );
         action.points[0].strength = tapWidth;
         this.paint(action.points[0], action.points[0], action, tapWidth, tapWidth);
         this.applyActionMask(action);
@@ -200,21 +208,16 @@ export class DrawingStore {
   moveSelection(selection: RasterSelection, x: number, y: number): RasterSelection | null {
     const offset = this.snapSelectionMovement(selection, x, y);
     if (offset.x === 0 && offset.y === 0) return selection;
-    const nextTree = this.tree.moveCells(selection.cells, offset.x, offset.y);
-    if (nextTree === this.tree) return selection;
+    const moved = this.tree.moveSelection(selection, offset.x, offset.y);
+    if (moved.tree === this.tree) return selection;
 
     this.undoStack.push(this.currentState());
     this.redoStack = [];
-    this.tree = nextTree;
+    this.tree = moved.tree;
     this.queueOccupiedResolutionUpdate();
     this.persist();
 
-    return this.tree.connectedIslandsTouchingAreas(selection.cells.map((cell) => ({
-      x: cell.bounds.x + offset.x,
-      y: cell.bounds.y + offset.y,
-      width: cell.bounds.width,
-      height: cell.bounds.height,
-    })));
+    return moved.selection;
   }
 
   debugLeavesIn(bounds: Bounds, scale = 1): QuadDebugRegion[] {
@@ -250,6 +253,7 @@ export class DrawingStore {
     density: number,
     texture: BrushTexture,
     textureSeed: number,
+    dynamics: number,
   ): BrushAction {
     if (!this.actionStart) {
       this.actionStart = this.currentState();
@@ -260,6 +264,7 @@ export class DrawingStore {
       points: [{ ...point, strength: kind === "eraser" ? width : undefined }],
       color,
       width,
+      dynamics: Math.max(0, Math.min(1, dynamics)),
       density: Math.max(0, Math.min(1, density)),
       texture,
       textureSeed,
@@ -311,7 +316,12 @@ export class DrawingStore {
     // Use the look-ahead measurement for the whole startup window. Replaying
     // local startup jitter would recreate the bulb this buffer is meant to avoid.
     action.points.forEach((point) => {
-      point.strength = pressureAdjustedWidth(initialWidth, point.pressure);
+      point.strength = dynamicsAdjustedWidth(
+        action.width,
+        initialWidth,
+        point.pressure,
+        action.dynamics,
+      );
     });
     this.paintReadyStrokeSegments(action, false);
   }
@@ -538,9 +548,16 @@ function interpolate(start: number, end: number, amount: number): number {
   return start + (end - start) * amount;
 }
 
-function pressureAdjustedWidth(width: number, pressure: number | undefined): number {
-  if (pressure === undefined) return width;
-  return width * (0.3 + Math.max(0, Math.min(1, pressure)) * 1.2);
+function dynamicsAdjustedWidth(
+  baseWidth: number,
+  velocityWidth: number,
+  pressure: number | undefined,
+  dynamics: number,
+): number {
+  const pressureFactor = pressure === undefined
+    ? 1
+    : 0.3 + Math.max(0, Math.min(1, pressure)) * 1.2;
+  return interpolate(baseWidth, velocityWidth * pressureFactor, dynamics);
 }
 
 function densityForPoint(action: BrushAction, point: Point): number {
@@ -574,7 +591,11 @@ function bufferedVelocityWidth(action: BrushAction): number {
   return widthFromVelocity(strongestVelocity, action.width);
 }
 
-function velocityWidth(previous: Point, current: Point, baseWidth: number): number {
+function velocityWidth(
+  previous: Point,
+  current: Point,
+  baseWidth: number,
+): number {
   if (previous.time === undefined || current.time === undefined) return baseWidth * SLOW_WIDTH_FACTOR;
   const distance = Math.hypot(current.x - previous.x, current.y - previous.y);
   const elapsed = Math.max(current.time - previous.time, 1);
