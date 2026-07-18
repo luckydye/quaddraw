@@ -93,6 +93,9 @@ button {
 .canvas-area[data-tool="pen"] {
     cursor: crosshair;
 }
+.canvas-area[data-tool="select"] {
+    cursor: default;
+}
 .canvas-area[data-tool="hand"] {
     cursor: grab;
 }

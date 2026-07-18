@@ -1,4 +1,11 @@
-import type { Bounds, BrushTexture, Point, QuadDebugRegion, RasterCell } from "./types";
+import type {
+  Bounds,
+  BrushTexture,
+  Point,
+  QuadDebugRegion,
+  RasterCell,
+  RasterSelection,
+} from "./types";
 
 export type QuadLeafNode = { readonly color: number; readonly children?: undefined };
 export type QuadBranchNode = {
@@ -99,6 +106,30 @@ export class RasterQuadTree {
 
   allCells(): RasterCell[] {
     return this.cellsIn(this.bounds);
+  }
+
+  /**
+   * Expands a spatial query to every complete 8-connected occupied island it
+   * touches. Quadtree leaves are dyadic rectangles, so matching their shared
+   * edges avoids flattening the sparse raster into a world-sized pixel grid.
+   */
+  connectedIslandsTouching(area: Bounds): RasterSelection | null {
+    const cells = this.allCells();
+    if (cells.length === 0) return null;
+
+    const components = connectedCellComponents(cells);
+    const touchedRoots = new Set<number>();
+    cells.forEach((cell, index) => {
+      if (rectanglesIntersect(cell.bounds, area)) touchedRoots.add(components.find(index));
+    });
+    if (touchedRoots.size === 0) return null;
+
+    const selectedCells = cells.filter((_, index) => touchedRoots.has(components.find(index)));
+    return {
+      cells: selectedCells,
+      bounds: enclosingBounds(selectedCells),
+      islandCount: touchedRoots.size,
+    };
   }
 
   debugLeavesIn(area: Bounds, scale = 1): QuadDebugRegion[] {
@@ -625,6 +656,145 @@ function rectanglesIntersect(first: Bounds, second: Bounds): boolean {
     && first.x + first.width > second.x
     && first.y < second.y + second.height
     && first.y + first.height > second.y;
+}
+
+type CellInterval = {
+  cell: number;
+  start: number;
+  end: number;
+};
+
+type SharedBoundary = {
+  before: CellInterval[];
+  after: CellInterval[];
+};
+
+/** Builds connected components from shared leaf boundaries, including corners. */
+function connectedCellComponents(cells: readonly RasterCell[]): DisjointSet {
+  const components = new DisjointSet(cells.length);
+  const vertical = new Map<number, SharedBoundary>();
+  const horizontal = new Map<number, SharedBoundary>();
+
+  cells.forEach(({ bounds }, cell) => {
+    addBoundaryInterval(
+      vertical,
+      bounds.x,
+      "after",
+      { cell, start: bounds.y, end: bounds.y + bounds.height },
+    );
+    addBoundaryInterval(
+      vertical,
+      bounds.x + bounds.width,
+      "before",
+      { cell, start: bounds.y, end: bounds.y + bounds.height },
+    );
+    addBoundaryInterval(
+      horizontal,
+      bounds.y,
+      "after",
+      { cell, start: bounds.x, end: bounds.x + bounds.width },
+    );
+    addBoundaryInterval(
+      horizontal,
+      bounds.y + bounds.height,
+      "before",
+      { cell, start: bounds.x, end: bounds.x + bounds.width },
+    );
+  });
+
+  vertical.forEach((boundary) => unionTouchingIntervals(boundary, components));
+  horizontal.forEach((boundary) => unionTouchingIntervals(boundary, components));
+  return components;
+}
+
+function addBoundaryInterval(
+  boundaries: Map<number, SharedBoundary>,
+  coordinate: number,
+  side: keyof SharedBoundary,
+  interval: CellInterval,
+): void {
+  let boundary = boundaries.get(coordinate);
+  if (!boundary) {
+    boundary = { before: [], after: [] };
+    boundaries.set(coordinate, boundary);
+  }
+  boundary[side].push(interval);
+}
+
+function unionTouchingIntervals(boundary: SharedBoundary, components: DisjointSet): void {
+  const before = boundary.before.sort(compareIntervals);
+  const after = boundary.after.sort(compareIntervals);
+  let beforeIndex = 0;
+  let afterIndex = 0;
+
+  while (beforeIndex < before.length && afterIndex < after.length) {
+    const first = before[beforeIndex];
+    const second = after[afterIndex];
+    if (first.end < second.start) {
+      beforeIndex += 1;
+      continue;
+    }
+    if (second.end < first.start) {
+      afterIndex += 1;
+      continue;
+    }
+
+    // Closed intervals deliberately include a single shared corner, giving
+    // diagonal brush pixels the same 8-connected behavior as an image editor.
+    components.union(first.cell, second.cell);
+    if (first.end <= second.end) beforeIndex += 1;
+    if (second.end <= first.end) afterIndex += 1;
+  }
+}
+
+function compareIntervals(first: CellInterval, second: CellInterval): number {
+  return first.start - second.start || first.end - second.end;
+}
+
+function enclosingBounds(cells: readonly RasterCell[]): Bounds {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const cell of cells) {
+    left = Math.min(left, cell.bounds.x);
+    top = Math.min(top, cell.bounds.y);
+    right = Math.max(right, cell.bounds.x + cell.bounds.width);
+    bottom = Math.max(bottom, cell.bounds.y + cell.bounds.height);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+class DisjointSet {
+  private readonly parents: Int32Array;
+  private readonly ranks: Uint8Array;
+
+  constructor(size: number) {
+    this.parents = Int32Array.from({ length: size }, (_, index) => index);
+    this.ranks = new Uint8Array(size);
+  }
+
+  find(value: number): number {
+    let root = value;
+    while (this.parents[root] !== root) root = this.parents[root];
+    while (this.parents[value] !== value) {
+      const parent = this.parents[value];
+      this.parents[value] = root;
+      value = parent;
+    }
+    return root;
+  }
+
+  union(first: number, second: number): void {
+    let firstRoot = this.find(first);
+    let secondRoot = this.find(second);
+    if (firstRoot === secondRoot) return;
+    if (this.ranks[firstRoot] < this.ranks[secondRoot]) {
+      [firstRoot, secondRoot] = [secondRoot, firstRoot];
+    }
+    this.parents[secondRoot] = firstRoot;
+    if (this.ranks[firstRoot] === this.ranks[secondRoot]) this.ranks[firstRoot] += 1;
+  }
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

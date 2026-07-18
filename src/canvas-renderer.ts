@@ -7,7 +7,14 @@ import {
 } from "./render-worker-protocol";
 import { createRenderWorker } from "./render-worker";
 import { WORLD_BOUNDS } from "./types";
-import type { Bounds, Camera, Point, QuadDebugRegion, RasterCell } from "./types";
+import type {
+  Bounds,
+  Camera,
+  Point,
+  QuadDebugRegion,
+  RasterCell,
+  RasterSelection,
+} from "./types";
 
 const GRID_SIZE = 40;
 const MINIMAP_SCALE = 0.012;
@@ -95,6 +102,8 @@ export class CanvasRenderer {
     debugRegions: readonly QuadDebugRegion[],
     redrawTree: boolean,
     renderedWorldBounds: Bounds | null,
+    selection: RasterSelection | null = null,
+    marquee: Bounds | null = null,
   ): void {
     const viewport = this.area.getBoundingClientRect();
     if (redrawTree) {
@@ -116,6 +125,7 @@ export class CanvasRenderer {
     this.context.clearRect(0, 0, viewport.width, viewport.height);
     this.drawGrid(viewport, camera);
     this.context.drawImage(this.treeCanvas, 0, 0, viewport.width, viewport.height);
+    this.drawSelection(camera, selection, marquee);
   }
 
   /** Queues a committed-cache rasterization without blocking the UI thread. */
@@ -282,6 +292,51 @@ export class CanvasRenderer {
       context.fillStyle = rgbaToCss(color);
       context.fill();
     });
+  }
+
+  private drawSelection(
+    camera: Camera,
+    selection: RasterSelection | null,
+    marquee: Bounds | null,
+  ): void {
+    if (!selection && !marquee) return;
+    this.context.save();
+    this.context.translate(camera.x, camera.y);
+    this.context.scale(camera.zoom, camera.zoom);
+
+    if (selection) {
+      this.context.beginPath();
+      for (const cell of selection.cells) {
+        this.context.rect(
+          cell.bounds.x,
+          cell.bounds.y,
+          cell.bounds.width,
+          cell.bounds.height,
+        );
+      }
+      this.context.fillStyle = "rgb(91 93 209 / 0.22)";
+      this.context.fill();
+      this.context.strokeStyle = "rgb(75 77 196 / 0.9)";
+      this.context.lineWidth = 1 / camera.zoom;
+      this.context.setLineDash([5 / camera.zoom, 4 / camera.zoom]);
+      this.context.strokeRect(
+        selection.bounds.x,
+        selection.bounds.y,
+        selection.bounds.width,
+        selection.bounds.height,
+      );
+    }
+
+    if (marquee) {
+      this.context.fillStyle = "rgb(91 93 209 / 0.08)";
+      this.context.fillRect(marquee.x, marquee.y, marquee.width, marquee.height);
+      this.context.strokeStyle = "rgb(75 77 196 / 0.95)";
+      this.context.lineWidth = 1 / camera.zoom;
+      this.context.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+      this.context.strokeRect(marquee.x, marquee.y, marquee.width, marquee.height);
+    }
+
+    this.context.restore();
   }
 
   private drawDebugRegions(

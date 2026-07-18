@@ -20,6 +20,11 @@ Use the `Q` shortcut or the quadtree toolbar button to overlay the live leaf
 topology. Outline hue represents depth, and occupied leaves are emphasized over
 their transparent siblings.
 
+The Select tool (`V`) treats the raster topology as 8-connected ink islands.
+Dragging a marquee selects every complete island touched by it, including ink
+outside the marquee; overlapping strokes form one island because vector stroke
+identity is intentionally not retained.
+
 ## Development
 
 ### Setup

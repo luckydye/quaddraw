@@ -22,7 +22,7 @@ export type Camera = {
   zoom: number;
 };
 
-export type Tool = "pen" | "eraser" | "hand";
+export type Tool = "select" | "pen" | "eraser" | "hand";
 export type BrushTexture = "solid" | "charcoal";
 
 /** Ephemeral pointer input. It is never rendered or persisted as a path. */
@@ -44,6 +44,13 @@ export type BrushAction = {
 export type RasterCell = {
   bounds: Bounds;
   color: number;
+};
+
+/** Complete connected ink islands selected by a point or marquee query. */
+export type RasterSelection = {
+  cells: RasterCell[];
+  bounds: Bounds;
+  islandCount: number;
 };
 
 /** A quadtree leaf exposed only for topology visualization. */

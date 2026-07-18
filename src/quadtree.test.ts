@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RasterQuadTree } from "./quadtree";
+import { createBranchNode, RasterQuadTree } from "./quadtree";
 import { WORLD_BOUNDS } from "./types";
 
 describe("RasterQuadTree", () => {
@@ -331,5 +331,45 @@ describe("RasterQuadTree", () => {
 
     expect(tree.cellsForRendering(WORLD_BOUNDS, 0.1).length).toBeLessThan(tree.allCells().length);
     expect(tree.debugLeavesIn(WORLD_BOUNDS, 0.1).length).toBeLessThan(tree.debugLeavesIn(WORLD_BOUNDS).length);
+  });
+
+  test("expands a marquee hit to the complete connected ink island", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS)
+      .paintSegment({ x: 0, y: 0 }, { x: 80, y: 0 }, 6, 6, "#393b42")
+      .paintSegment({ x: 200, y: 0 }, { x: 240, y: 0 }, 6, 6, "#f35b4c");
+
+    const selection = tree.connectedIslandsTouching({ x: -4, y: -4, width: 8, height: 8 });
+
+    expect(selection).not.toBeNull();
+    expect(selection!.islandCount).toBe(1);
+    expect(selection!.bounds.x + selection!.bounds.width).toBeGreaterThan(75);
+    expect(selection!.bounds.x + selection!.bounds.width).toBeLessThan(100);
+    expect(selection!.cells.every((cell) => cell.bounds.x < 100)).toBe(true);
+  });
+
+  test("selects every disconnected island touched by one marquee", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS)
+      .paintSegment({ x: 0, y: 0 }, { x: 20, y: 0 }, 6, 6, "#393b42")
+      .paintSegment({ x: 60, y: 0 }, { x: 80, y: 0 }, 6, 6, "#4c8deb");
+
+    const selection = tree.connectedIslandsTouching({ x: -10, y: -10, width: 100, height: 20 });
+
+    expect(selection?.islandCount).toBe(2);
+    expect(selection!.bounds.width).toBeGreaterThan(75);
+  });
+
+  test("treats diagonally touching occupied leaves as one island", () => {
+    const transparent = { color: 0 } as const;
+    const ink = { color: 0x393b42ff } as const;
+    const tree = RasterQuadTree.fromSnapshot(
+      { x: 0, y: 0, width: 2, height: 2 },
+      createBranchNode([ink, transparent, transparent, ink]),
+    );
+
+    const selection = tree.connectedIslandsTouching({ x: 0, y: 0, width: 0.5, height: 0.5 });
+
+    expect(selection?.islandCount).toBe(1);
+    expect(selection?.cells).toHaveLength(2);
+    expect(selection?.bounds).toEqual({ x: 0, y: 0, width: 2, height: 2 });
   });
 });

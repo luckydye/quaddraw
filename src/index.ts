@@ -8,6 +8,7 @@ import type {
   Point,
   QuadDebugRegion,
   RasterCell,
+  RasterSelection,
   Tool,
 } from "./types";
 
@@ -48,6 +49,9 @@ let currentAction: BrushAction | null = null;
 let visibleCells: readonly RasterCell[] = [];
 let visibleDebugRegions: readonly QuadDebugRegion[] = [];
 let renderedWorldBounds: Bounds | null = null;
+let selection: RasterSelection | null = null;
+let selectionStart: Point | null = null;
+let selectionMarquee: Bounds | null = null;
 let debugQuadtree = false;
 let isPanning = false;
 let isSpacePressed = false;
@@ -84,9 +88,25 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
       visibleCells,
       visibleDebugRegions,
       renderedWorldBounds,
-      () => renderer.render(camera, visibleCells, visibleDebugRegions, false, renderedWorldBounds),
+      () => renderer.render(
+        camera,
+        visibleCells,
+        visibleDebugRegions,
+        false,
+        renderedWorldBounds,
+        selection,
+        selectionMarquee,
+      ),
     );
-  renderer.render(camera, visibleCells, visibleDebugRegions, redrawTree && !workerAccepted, renderedWorldBounds);
+  renderer.render(
+    camera,
+    visibleCells,
+    visibleDebugRegions,
+    redrawTree && !workerAccepted,
+    renderedWorldBounds,
+    selection,
+    selectionMarquee,
+  );
   if (redrawMinimap) {
     renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
   }
@@ -170,6 +190,7 @@ function renderViewportPreview(): void {
 }
 
 function beginDrawing(point: Point): void {
+  selection = null;
   currentAction = store.createStroke(
     point,
     activeColor,
@@ -182,11 +203,23 @@ function beginDrawing(point: Point): void {
   render(true, false);
 }
 
-function finishInteraction(): void {
+function finishInteraction(completeSelection = true): void {
   const finishedPanning = isPanning && currentAction === null;
   if (currentAction) {
     store.commit(currentAction);
     currentAction = null;
+  }
+
+  if (selectionStart) {
+    if (completeSelection) {
+      const area = selectionHitArea(selectionMarquee ?? boundsFromPoints(selectionStart, selectionStart));
+      selection = store.selectConnectedIslands(area);
+      if (selection) {
+        showToast(`${selection.islandCount} ink island${selection.islandCount === 1 ? "" : "s"} selected`);
+      }
+    }
+    selectionStart = null;
+    selectionMarquee = null;
   }
 
   isPanning = false;
@@ -194,6 +227,29 @@ function finishInteraction(): void {
   elements.area.classList.remove("is-panning");
   window.clearTimeout(viewportSettleTimer);
   render(true, true, finishedPanning);
+}
+
+function boundsFromPoints(first: Point, second: Point): Bounds {
+  const x = Math.min(first.x, second.x);
+  const y = Math.min(first.y, second.y);
+  return {
+    x,
+    y,
+    width: Math.max(first.x, second.x) - x,
+    height: Math.max(first.y, second.y) - y,
+  };
+}
+
+function selectionHitArea(bounds: Bounds): Bounds {
+  const minimumSize = 6 / camera.zoom;
+  const width = Math.max(bounds.width, minimumSize);
+  const height = Math.max(bounds.height, minimumSize);
+  return {
+    x: bounds.x - (width - bounds.width) / 2,
+    y: bounds.y - (height - bounds.height) / 2,
+    width,
+    height,
+  };
 }
 
 function showToast(message: string): void {
@@ -208,12 +264,21 @@ function bindCanvasEvents(): void {
     const point = renderer.screenToWorld(event, camera);
     lastPointerPosition = { x: event.clientX, y: event.clientY };
 
+    if (activeTool === "select" && !isSpacePressed) {
+      selection = null;
+      selectionStart = point;
+      selectionMarquee = boundsFromPoints(point, point);
+      render(false, false);
+      return;
+    }
+
     if (activeTool === "pen" && !isSpacePressed) {
       beginDrawing(point);
       return;
     }
 
     if (activeTool === "eraser" && !isSpacePressed) {
+      selection = null;
       currentAction = store.createEraser(point, ERASER_WIDTH);
       render(true, false);
       return;
@@ -226,6 +291,12 @@ function bindCanvasEvents(): void {
   });
 
   elements.canvas.addEventListener("pointermove", (event) => {
+    if (selectionStart) {
+      selectionMarquee = boundsFromPoints(selectionStart, renderer.screenToWorld(event, camera));
+      render(false, false);
+      return;
+    }
+
     if (currentAction) {
       const coalescedEvents = event.getCoalescedEvents?.() ?? [event];
       for (const coalescedEvent of coalescedEvents) {
@@ -243,8 +314,8 @@ function bindCanvasEvents(): void {
     }
   });
 
-  elements.canvas.addEventListener("pointerup", finishInteraction);
-  elements.canvas.addEventListener("pointercancel", finishInteraction);
+  elements.canvas.addEventListener("pointerup", () => finishInteraction());
+  elements.canvas.addEventListener("pointercancel", () => finishInteraction(false));
 
   elements.area.addEventListener(
     "wheel",
@@ -296,17 +367,20 @@ function bindControls(): void {
 
   requiredElement<HTMLButtonElement>("#undo").addEventListener("click", () => {
     if (store.undo()) {
+      selection = null;
       render();
     }
   });
 
   requiredElement<HTMLButtonElement>("#redo").addEventListener("click", () => {
     if (store.redo()) {
+      selection = null;
       render();
     }
   });
 
   requiredElement<HTMLButtonElement>("#clearButton").addEventListener("click", () => {
+    selection = null;
     store.clear();
     render();
     showToast("Canvas cleared");
@@ -332,6 +406,13 @@ function bindKeyboardShortcuts(): void {
     if (event.key.toLowerCase() === "p") selectTool("pen");
     if (event.key.toLowerCase() === "e") selectTool("eraser");
     if (event.key.toLowerCase() === "h") selectTool("hand");
+    if (event.key.toLowerCase() === "v" && !event.metaKey && !event.ctrlKey) selectTool("select");
+    if (event.key === "Escape" && (selection || selectionMarquee)) {
+      selection = null;
+      selectionStart = null;
+      selectionMarquee = null;
+      render(false, false);
+    }
     if (event.key.toLowerCase() === "q" && !event.metaKey && !event.ctrlKey && !event.repeat) {
       toggleQuadtreeDebug();
     }
@@ -339,6 +420,7 @@ function bindKeyboardShortcuts(): void {
     if ((event.metaKey || event.ctrlKey) && event.key === "z") {
       event.preventDefault();
       if (event.shiftKey ? store.redo() : store.undo()) {
+        selection = null;
         render();
       }
     }

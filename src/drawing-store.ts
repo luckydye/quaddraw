@@ -1,6 +1,14 @@
 import { RasterQuadTree } from "./quadtree";
 import { loadQuadTree, saveQuadTree, type SnapshotSizes } from "./quadtree-storage";
-import type { Bounds, BrushAction, BrushTexture, Point, QuadDebugRegion, RasterCell } from "./types";
+import type {
+  Bounds,
+  BrushAction,
+  BrushTexture,
+  Point,
+  QuadDebugRegion,
+  RasterCell,
+  RasterSelection,
+} from "./types";
 import { WORLD_BOUNDS } from "./types";
 
 type DrawingState = {
@@ -169,6 +177,10 @@ export class DrawingStore {
 
   allCells(scale = 1): RasterCell[] {
     return this.tree.cellsForRendering(WORLD_BOUNDS, scale);
+  }
+
+  selectConnectedIslands(area: Bounds): RasterSelection | null {
+    return this.tree.connectedIslandsTouching(area);
   }
 
   debugLeavesIn(bounds: Bounds, scale = 1): QuadDebugRegion[] {
