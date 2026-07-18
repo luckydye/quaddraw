@@ -30,6 +30,25 @@ describe("RasterQuadTree", () => {
     expect(erased.allCells()).toHaveLength(0);
   });
 
+  test("reports the effective resolution of occupied bounds", () => {
+    const empty = new RasterQuadTree(WORLD_BOUNDS);
+    const partial = empty.paintSegment({ x: 0, y: 0 }, { x: 40, y: 20 }, 6, 6, "#393b42");
+    const full = empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#393b42",
+    );
+
+    expect(empty.occupiedResolution()).toEqual({ width: 0, height: 0 });
+    expect(partial.occupiedResolution().width).toBeGreaterThan(0);
+    expect(partial.occupiedResolution().height).toBeGreaterThan(0);
+    expect(partial.occupiedResolution().width).toBeLessThan(32_768);
+    expect(partial.occupiedResolution().height).toBeLessThan(32_768);
+    expect(full.occupiedResolution()).toEqual({ width: 32_768, height: 32_768 });
+  });
+
   test("shares unchanged versions instead of mutating history", () => {
     const first = new RasterQuadTree(WORLD_BOUNDS);
     const second = first.paintSegment({ x: 10, y: 10 }, { x: 15, y: 15 }, 3, 3, "#4c8deb");

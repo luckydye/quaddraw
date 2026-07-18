@@ -32,6 +32,7 @@ export class DrawingStore {
   private persistenceWriting = false;
   private persistencePending = false;
   private persistedSnapshotSizes: SnapshotSizes = { compressedBytes: 0, uncompressedBytes: 0 };
+  private occupiedResolutionValue = { width: 0, height: 0 };
   private readonly snapshotSizeListeners = new Set<() => void>();
 
   async restore(): Promise<void> {
@@ -39,6 +40,7 @@ export class DrawingStore {
     if (!restored) return;
     this.tree = restored.tree;
     this.committedStrokeCount = restored.strokeCount;
+    this.updateOccupiedResolution();
     this.setSnapshotSizes(restored.snapshotSizes);
     if (restored.needsUpgrade) this.persist();
   }
@@ -127,6 +129,7 @@ export class DrawingStore {
     this.actionStart = null;
     this.actionMask = null;
     if (action.kind === "stroke") this.committedStrokeCount += 1;
+    this.updateOccupiedResolution();
     this.persist();
   }
 
@@ -156,6 +159,7 @@ export class DrawingStore {
     this.committedStrokeCount = 0;
     this.actionStart = null;
     this.actionMask = null;
+    this.updateOccupiedResolution();
     this.persist();
   }
 
@@ -177,6 +181,10 @@ export class DrawingStore {
 
   get nodeCount(): number {
     return this.tree.countNodes();
+  }
+
+  get occupiedResolution(): Readonly<{ width: number; height: number }> {
+    return this.occupiedResolutionValue;
   }
 
   get snapshotSizes(): SnapshotSizes {
@@ -337,6 +345,11 @@ export class DrawingStore {
     this.committedStrokeCount = state.strokeCount;
     this.actionStart = null;
     this.actionMask = null;
+    this.updateOccupiedResolution();
+  }
+
+  private updateOccupiedResolution(): void {
+    this.occupiedResolutionValue = this.tree.occupiedResolution();
   }
 
   private persist(): void {

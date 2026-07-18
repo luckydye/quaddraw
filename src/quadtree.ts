@@ -111,6 +111,17 @@ export class RasterQuadTree {
     return isBranchNode(this.root) ? this.root.nodeCount : 1;
   }
 
+  /** Max-depth raster pixels spanned by the bounds of all non-transparent leaves. */
+  occupiedResolution(): { width: number; height: number } {
+    const occupied = occupiedBounds(this.root, this.bounds);
+    if (!occupied) return { width: 0, height: 0 };
+    const maximumResolution = 2 ** MAX_DEPTH;
+    return {
+      width: Math.round(occupied.width / this.bounds.width * maximumResolution),
+      height: Math.round(occupied.height / this.bounds.height * maximumResolution),
+    };
+  }
+
   snapshot(): QuadNode {
     return this.root;
   }
@@ -349,6 +360,27 @@ function collectCells(
   collectCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, cells);
   collectCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, cells);
   collectCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, cells);
+}
+
+function occupiedBounds(node: QuadNode, bounds: Bounds): Bounds | null {
+  if (!isBranchNode(node)) return (node.color & 0xff) === 0 ? null : bounds;
+
+  const childBounds = splitBounds(bounds);
+  let occupied: Bounds | null = null;
+  node.children.forEach((child, index) => {
+    const childOccupied = occupiedBounds(child, childBounds[index]);
+    if (!childOccupied) return;
+    if (!occupied) {
+      occupied = childOccupied;
+      return;
+    }
+    const right = Math.max(occupied.x + occupied.width, childOccupied.x + childOccupied.width);
+    const bottom = Math.max(occupied.y + occupied.height, childOccupied.y + childOccupied.height);
+    const x = Math.min(occupied.x, childOccupied.x);
+    const y = Math.min(occupied.y, childOccupied.y);
+    occupied = { x, y, width: right - x, height: bottom - y };
+  });
+  return occupied;
 }
 
 function collectRenderCells(

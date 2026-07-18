@@ -25,6 +25,7 @@ const elements = {
   hint: requiredElement<HTMLElement>("#canvasHint"),
   strokeCount: requiredElement<HTMLElement>("#strokeCount"),
   nodeCount: requiredElement<HTMLElement>("#nodeCount"),
+  occupiedResolution: requiredElement<HTMLElement>("#occupiedResolution"),
   snapshotCompressedSize: requiredElement<HTMLElement>("#snapshotCompressedSize"),
   snapshotUncompressedSize: requiredElement<HTMLElement>("#snapshotUncompressedSize"),
   weight: requiredElement<HTMLInputElement>("#weight"),
@@ -95,6 +96,11 @@ function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false
 function updateStatus(): void {
   setText(elements.strokeCount, String(store.strokeCount));
   setText(elements.nodeCount, String(store.nodeCount));
+  const occupiedResolution = store.occupiedResolution;
+  setText(
+    elements.occupiedResolution,
+    `${occupiedResolution.width.toLocaleString()} × ${occupiedResolution.height.toLocaleString()} px`,
+  );
   setText(elements.snapshotCompressedSize, formatByteSize(store.snapshotSizes.compressedBytes));
   setText(elements.snapshotUncompressedSize, formatByteSize(store.snapshotSizes.uncompressedBytes));
   setText(elements.zoomLevel, `${Math.round(camera.zoom * 100)}%`);
