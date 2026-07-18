@@ -43,6 +43,8 @@ export class CanvasRenderer {
   private cacheWidth = 0;
   private cacheHeight = 0;
   private pixelScale = 1;
+  private canvasLeft = 0;
+  private canvasTop = 0;
   private renderWorker: Worker | null = null;
   private renderRequestId = 0;
   private pathSelection: RasterSelection | null = null;
@@ -77,6 +79,8 @@ export class CanvasRenderer {
   resize(): void {
     const bounds = this.area.getBoundingClientRect();
     const scale = window.devicePixelRatio;
+    this.canvasLeft = bounds.left;
+    this.canvasTop = bounds.top;
     this.pixelScale = scale;
     this.canvas.width = bounds.width * scale;
     this.canvas.height = bounds.height * scale;
@@ -103,10 +107,9 @@ export class CanvasRenderer {
   }
 
   screenToWorld(event: PointerEvent, camera: Camera): Point {
-    const bounds = this.canvas.getBoundingClientRect();
     return {
-      x: (event.clientX - bounds.left - camera.x) / camera.zoom,
-      y: (event.clientY - bounds.top - camera.y) / camera.zoom,
+      x: (event.clientX - this.canvasLeft - camera.x) / camera.zoom,
+      y: (event.clientY - this.canvasTop - camera.y) / camera.zoom,
       time: event.timeStamp,
       pressure: event.pointerType === "pen" ? event.pressure : undefined,
     };

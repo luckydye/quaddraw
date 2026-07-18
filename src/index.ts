@@ -1,4 +1,5 @@
 import { CanvasRenderer } from "./canvas-renderer";
+import { ColorPickerElement } from "./color-picker";
 import {
   cameraAfterGesture,
   gestureFrame,
@@ -37,10 +38,15 @@ const BRUSH_PRESETS = {
 
 type BrushPresetId = keyof typeof BRUSH_PRESETS;
 
+if (!customElements.get("a-color-picker")) {
+  customElements.define("a-color-picker", ColorPickerElement);
+}
+
 const elements = {
   area: requiredElement<HTMLElement>("#canvasArea"),
   canvas: requiredElement<HTMLCanvasElement>("#drawingCanvas"),
   brushCursor: requiredElement<HTMLElement>("#brushCursor"),
+  brushColor: requiredElement<ColorPickerElement>("#brushColor"),
   minimap: requiredElement<HTMLCanvasElement>("#minimapCanvas"),
   hint: requiredElement<HTMLElement>("#canvasHint"),
   strokeCount: requiredElement<HTMLElement>("#strokeCount"),
@@ -553,9 +559,8 @@ function bindCanvasEvents(): void {
       elements.area.classList.remove("has-brush-pointer");
       return;
     }
-    const bounds = elements.area.getBoundingClientRect();
-    elements.brushCursor.style.left = `${event.clientX - bounds.left}px`;
-    elements.brushCursor.style.top = `${event.clientY - bounds.top}px`;
+    elements.brushCursor.style.setProperty("--brush-cursor-x", `${event.offsetX}px`);
+    elements.brushCursor.style.setProperty("--brush-cursor-y", `${event.offsetY}px`);
     elements.area.classList.add("has-brush-pointer");
   };
   elements.canvas.addEventListener("pointerenter", positionBrushCursor);
@@ -765,14 +770,12 @@ function bindControls(): void {
     if (store.moveLayer(store.activeLayerId, index - 1)) renderAfterLayerChange();
   });
 
-  document.querySelectorAll<HTMLButtonElement>("#swatches button").forEach((button) => {
-    button.addEventListener("click", () => {
-      activeColor = button.dataset.color!;
-      document.querySelectorAll("#swatches button").forEach((swatch) => swatch.classList.remove("selected"));
-      button.classList.add("selected");
-      updateBrushCursor();
-    });
-  });
+  const updateBrushColor = () => {
+    activeColor = elements.brushColor.value;
+    updateBrushCursor();
+  };
+  elements.brushColor.addEventListener("input", updateBrushColor);
+  elements.brushColor.addEventListener("change", updateBrushColor);
 
   requiredElement<HTMLButtonElement>("#zoomIn").addEventListener("click", () => {
     updateCameraZoom(camera.zoom * ZOOM_BUTTON_FACTOR);

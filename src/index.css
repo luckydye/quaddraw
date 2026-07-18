@@ -139,9 +139,9 @@ button {
     box-shadow: 0 0 0 1px rgb(255 255 255 / 0.92);
     opacity: 0;
     pointer-events: none;
-    transform: translate(-50%, -50%);
+    transform: translate3d(var(--brush-cursor-x, 0), var(--brush-cursor-y, 0), 0) translate(-50%, -50%);
     transition: opacity 0.08s ease;
-    will-change: left, top, width, height;
+    will-change: transform, width, height;
 }
 .brush-cursor::before {
     content: "";
@@ -259,22 +259,14 @@ button {
     font-size: 11px;
     margin-top: 14px;
 }
-.swatches {
-    display: flex;
-    gap: 6px;
+.brush-color-picker {
+    display: block;
+    width: 100%;
     margin-top: 9px;
-}
-.swatches button {
-    --swatch: #000;
-    width: 19px;
-    height: 19px;
-    background: var(--swatch);
-    border-radius: 50%;
-    outline: 2px solid transparent;
-    outline-offset: 2px;
-}
-.swatches button.selected {
-    outline-color: #5b5dd1;
+    color: #5f5f67;
+    --color-picker-border: #dedee3;
+    --color-picker-focus-outline: #5b5dd1;
+    --color-picker-swatch-size: 19px;
 }
 .brush-presets {
     display: grid;

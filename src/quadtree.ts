@@ -19,7 +19,10 @@ export type QuadNode = QuadLeafNode | QuadBranchNode;
 
 const TRANSPARENT = 0;
 const MAX_DEPTH = 15;
-const MAX_LOD_CELL_PIXELS = 1.25;
+const FINE_LOD_CELL_PIXELS = 1.25;
+const COARSE_LOD_CELL_PIXELS = 2.5;
+const FINE_LOD_ZOOM = 0.75;
+const COARSE_LOD_ZOOM = 0.35;
 const CHARCOAL_RADIUS_VARIATION_MAX = 1.04;
 const CHARCOAL_FEATHER_FACTOR = 0.32;
 const CHARCOAL_FEATHER_MINIMUM = 1.25;
@@ -92,6 +95,7 @@ export class RasterQuadTree {
   cellsForRendering(area: Bounds, scale: number): RasterCell[] {
     if (scale >= 1) return this.cellsIn(area);
     const cells: RasterCell[] = [];
+    const normalizedScale = Math.max(scale, 0.0001);
     collectRenderCells(
       this.root,
       this.bounds.x,
@@ -99,7 +103,8 @@ export class RasterQuadTree {
       this.bounds.width,
       this.bounds.height,
       area,
-      Math.max(scale, 0.0001),
+      normalizedScale,
+      lodCellPixelLimit(normalizedScale),
       cells,
     );
     return cells;
@@ -253,7 +258,16 @@ export class RasterQuadTree {
 
   debugLeavesIn(area: Bounds, scale = 1): QuadDebugRegion[] {
     const regions: QuadDebugRegion[] = [];
-    collectDebugLeaves(this.root, this.bounds, area, Math.max(scale, 0.0001), 0, regions);
+    const normalizedScale = Math.max(scale, 0.0001);
+    collectDebugLeaves(
+      this.root,
+      this.bounds,
+      area,
+      normalizedScale,
+      lodCellPixelLimit(normalizedScale),
+      0,
+      regions,
+    );
     return regions;
   }
 
@@ -580,6 +594,7 @@ function collectRenderCells(
   height: number,
   area: Bounds,
   scale: number,
+  cellPixelLimit: number,
   cells: RasterCell[],
 ): void {
   if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
@@ -589,17 +604,25 @@ function collectRenderCells(
   }
   const branch = node as QuadBranchNode;
 
-  if (Math.max(width, height) * scale <= MAX_LOD_CELL_PIXELS) {
+  if (Math.max(width, height) * scale <= cellPixelLimit) {
     if ((branch.average & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: branch.average });
     return;
   }
 
   const halfWidth = width / 2;
   const halfHeight = height / 2;
-  collectRenderCells(branch.children[0], x, y, halfWidth, halfHeight, area, scale, cells);
-  collectRenderCells(branch.children[1], x + halfWidth, y, halfWidth, halfHeight, area, scale, cells);
-  collectRenderCells(branch.children[2], x, y + halfHeight, halfWidth, halfHeight, area, scale, cells);
-  collectRenderCells(branch.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, scale, cells);
+  collectRenderCells(
+    branch.children[0], x, y, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  );
+  collectRenderCells(
+    branch.children[1], x + halfWidth, y, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  );
+  collectRenderCells(
+    branch.children[2], x, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  );
+  collectRenderCells(
+    branch.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  );
 }
 
 function collectDebugLeaves(
@@ -607,6 +630,7 @@ function collectDebugLeaves(
   bounds: Bounds,
   area: Bounds,
   scale: number,
+  cellPixelLimit: number,
   depth: number,
   regions: QuadDebugRegion[],
 ): void {
@@ -616,15 +640,25 @@ function collectDebugLeaves(
     return;
   }
 
-  if (scale < 1 && Math.max(bounds.width, bounds.height) * scale <= MAX_LOD_CELL_PIXELS) {
+  if (scale < 1 && Math.max(bounds.width, bounds.height) * scale <= cellPixelLimit) {
     regions.push({ bounds, depth, occupied: (node.average & 0xff) !== 0 });
     return;
   }
 
   const childBounds = splitBounds(bounds);
   node.children.forEach((child, index) =>
-    collectDebugLeaves(child, childBounds[index], area, scale, depth + 1, regions)
+    collectDebugLeaves(child, childBounds[index], area, scale, cellPixelLimit, depth + 1, regions)
   );
+}
+
+function lodCellPixelLimit(scale: number): number {
+  const coarseAmount = clamp(
+    (FINE_LOD_ZOOM - scale) / (FINE_LOD_ZOOM - COARSE_LOD_ZOOM),
+    0,
+    1,
+  );
+  return FINE_LOD_CELL_PIXELS
+    + (COARSE_LOD_CELL_PIXELS - FINE_LOD_CELL_PIXELS) * coarseAmount;
 }
 
 function representativeColor(node: QuadNode): number {

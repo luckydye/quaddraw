@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "lit": "^3.3.3",
     "tailwindcss": "^4.1.13"
   }
 }

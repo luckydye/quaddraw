@@ -166,7 +166,7 @@ export class DrawingStore {
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
-    this.updateOccupiedResolution();
+    this.queueOccupiedResolutionUpdate();
     this.persist();
   }
 
@@ -216,11 +216,19 @@ export class DrawingStore {
   }
 
   visibleIn(bounds: Bounds, scale = 1): RasterCell[] {
-    return this.document.layers.flatMap((layer) => cellsForLayer(layer, bounds, scale));
+    const visible: RasterCell[] = [];
+    for (const layer of this.document.layers) {
+      for (const cell of cellsForLayer(layer, bounds, scale)) visible.push(cell);
+    }
+    return visible;
   }
 
   allCells(scale = 1): RasterCell[] {
-    return this.document.layers.flatMap((layer) => cellsForLayer(layer, WORLD_BOUNDS, scale));
+    const visible: RasterCell[] = [];
+    for (const layer of this.document.layers) {
+      for (const cell of cellsForLayer(layer, WORLD_BOUNDS, scale)) visible.push(cell);
+    }
+    return visible;
   }
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
@@ -801,11 +809,11 @@ function widthFromVelocity(velocity: number, baseWidth: number): number {
 function cellsForLayer(layer: DrawingLayer, bounds: Bounds, scale: number): RasterCell[] {
   if (!layer.visible || layer.opacity <= 0) return [];
   const cells = layer.tree.cellsForRendering(bounds, scale);
-  return cells.map((cell) => ({
-    ...cell,
-    color: layer.opacity >= 1
-      ? cell.color
-      : (cell.color & 0xffffff00) | Math.round((cell.color & 0xff) * layer.opacity),
-    renderGroup: layer.id,
-  }));
+  for (const cell of cells) {
+    if (layer.opacity < 1) {
+      cell.color = (cell.color & 0xffffff00) | Math.round((cell.color & 0xff) * layer.opacity);
+    }
+    cell.renderGroup = layer.id;
+  }
+  return cells;
 }
