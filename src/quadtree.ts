@@ -31,6 +31,7 @@ export class RasterQuadTree {
     endWidth: number,
     color: string,
     erase = false,
+    density = 1,
   ): RasterQuadTree {
     const paintColor = colorFromHex(color);
     const startRadius = Math.max(startWidth / 2, 0.5);
@@ -45,7 +46,14 @@ export class RasterQuadTree {
       endRadius,
       paintColor,
       erase,
+      clamp(density, 0, 1),
     );
+    return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
+  }
+
+  /** Composites one unioned gesture mask so overlapping input segments blend only once. */
+  applyMask(mask: RasterQuadTree, color: string, erase = false): RasterQuadTree {
+    const nextRoot = applyMaskNode(this.root, mask.root, colorFromHex(color), erase);
     return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
 
@@ -120,6 +128,7 @@ function paintNode(
   endRadius: number,
   paintColor: number,
   erase: boolean,
+  density: number,
 ): QuadNode {
   const maximumRadius = Math.max(startRadius, endRadius);
   const minimumDistance = Math.sqrt(distanceSquaredSegmentToRect(start, end, bounds));
@@ -130,8 +139,14 @@ function paintNode(
   const maximumDistance = maximumCornerDistance(start, end, bounds);
   const minimumRadius = Math.min(startRadius, endRadius);
   if (maximumDistance <= Math.max(0, minimumRadius - 0.5)) {
-    const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
-    return node.color === replacement ? node : uniform(replacement);
+    if (erase || density === 1) {
+      const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
+      return node.color === replacement ? node : uniform(replacement);
+    }
+    if (!isBranchNode(node)) {
+      const replacement = composite(node.color, paintColor, density, false);
+      return node.color === replacement ? node : uniform(replacement);
+    }
   }
 
   if (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1)) {
@@ -142,7 +157,7 @@ function paintNode(
     const coverage = clamp(localRadius + 0.5 - distance, 0, 1);
     if (coverage === 0) return node;
     const currentColor = node.color ?? representativeColor(node);
-    const nextColor = composite(currentColor, paintColor, coverage, erase);
+    const nextColor = composite(currentColor, paintColor, coverage * density, erase);
     return nextColor === currentColor ? node : uniform(nextColor);
   }
 
@@ -159,6 +174,7 @@ function paintNode(
       endRadius,
       paintColor,
       erase,
+      density,
     )
   ) as [QuadNode, QuadNode, QuadNode, QuadNode];
 
@@ -171,6 +187,34 @@ function paintNode(
     return uniform(firstColor);
   }
 
+  return createBranchNode(children);
+}
+
+function applyMaskNode(base: QuadNode, mask: QuadNode, paintColor: number, erase: boolean): QuadNode {
+  if (!isBranchNode(mask)) {
+    const coverage = (mask.color & 0xff) / 255;
+    if (coverage === 0) return base;
+    if (coverage === 1) {
+      const replacement = erase ? TRANSPARENT : paintColor;
+      return base.color === replacement ? base : uniform(replacement);
+    }
+    if (!isBranchNode(base)) {
+      const replacement = composite(base.color, paintColor, coverage, erase);
+      return replacement === base.color ? base : uniform(replacement);
+    }
+  }
+
+  const baseChildren = base.children ?? [base, base, base, base];
+  const maskChildren = mask.children ?? [mask, mask, mask, mask];
+  const children = baseChildren.map((child, index) =>
+    applyMaskNode(child, maskChildren[index], paintColor, erase)
+  ) as [QuadNode, QuadNode, QuadNode, QuadNode];
+
+  if (children.every((child, index) => child === baseChildren[index])) return base;
+  const firstColor = children[0].color;
+  if (firstColor !== undefined && children.every((child) => child.color === firstColor)) {
+    return uniform(firstColor);
+  }
   return createBranchNode(children);
 }
 

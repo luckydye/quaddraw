@@ -46,3 +46,17 @@ describe("DrawingStore velocity initialization", () => {
     expect(action.points[action.points.length - 1].strength!).toBeLessThan(action.width);
   });
 });
+
+describe("DrawingStore brush density", () => {
+  test("forwards density into the rasterized stroke", () => {
+    const store = new DrawingStore();
+    const action = store.createStroke({ x: 0, y: 0, time: 0 }, "#4c8deb", 100_000, 0.25);
+
+    store.appendPoint(action, { x: 20, y: 0, time: 10 });
+    store.appendPoint(action, { x: 40, y: 0, time: 20 });
+
+    const cells = store.visibleIn(WORLD_BOUNDS);
+    expect(cells).toHaveLength(1);
+    expect(cells[0].color & 0xff).toBe(64);
+  });
+});

@@ -25,6 +25,7 @@ export class DrawingStore {
   private undoStack: DrawingState[] = [];
   private redoStack: DrawingState[] = [];
   private actionStart: DrawingState | null = null;
+  private actionMask: RasterQuadTree | null = null;
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
@@ -40,12 +41,12 @@ export class DrawingStore {
     if (restored.needsUpgrade) this.persist();
   }
 
-  createStroke(point: Point, color: string, width: number): BrushAction {
-    return this.createAction("stroke", point, color, width);
+  createStroke(point: Point, color: string, width: number, density = 1): BrushAction {
+    return this.createAction("stroke", point, color, width, density);
   }
 
   createEraser(point: Point, width: number): BrushAction {
-    return this.createAction("eraser", point, "#000000", width);
+    return this.createAction("eraser", point, "#000000", width, 1);
   }
 
   appendPoint(action: BrushAction, point: Point): void {
@@ -76,6 +77,7 @@ export class DrawingStore {
       previousPoint.strength ?? action.width,
       point.strength ?? action.width,
     );
+    this.applyActionMask(action);
   }
 
   commit(action: BrushAction): void {
@@ -85,6 +87,7 @@ export class DrawingStore {
         // A tap never produces a velocity sample, so commit a neutral-width dot.
         action.points[0].strength = action.width;
         this.paint(action.points[0], action.points[0], action, action.width, action.width);
+        this.applyActionMask(action);
       } else {
         this.paintBufferedStrokeStart(action);
       }
@@ -94,11 +97,13 @@ export class DrawingStore {
     }
     if (this.tree === this.actionStart.tree) {
       this.actionStart = null;
+      this.actionMask = null;
       return;
     }
     this.undoStack.push(this.actionStart);
     this.redoStack = [];
     this.actionStart = null;
+    this.actionMask = null;
     if (action.kind === "stroke") this.committedStrokeCount += 1;
     this.persist();
   }
@@ -128,6 +133,7 @@ export class DrawingStore {
     this.tree = new RasterQuadTree(WORLD_BOUNDS);
     this.committedStrokeCount = 0;
     this.actionStart = null;
+    this.actionMask = null;
     this.persist();
   }
 
@@ -160,16 +166,29 @@ export class DrawingStore {
     return () => this.snapshotSizeListeners.delete(listener);
   }
 
-  private createAction(kind: BrushAction["kind"], point: Point, color: string, width: number): BrushAction {
-    if (!this.actionStart) this.actionStart = this.currentState();
+  private createAction(
+    kind: BrushAction["kind"],
+    point: Point,
+    color: string,
+    width: number,
+    density: number,
+  ): BrushAction {
+    if (!this.actionStart) {
+      this.actionStart = this.currentState();
+      this.actionMask = new RasterQuadTree(WORLD_BOUNDS);
+    }
     const action: BrushAction = {
       kind,
       points: [{ ...point, strength: kind === "eraser" ? width : undefined }],
       color,
       width,
+      density: Math.max(0, Math.min(1, density)),
       rasterizedSegments: 0,
     };
-    if (kind === "eraser") this.paint(action.points[0], action.points[0], action, width, width);
+    if (kind === "eraser") {
+      this.paint(action.points[0], action.points[0], action, width, width);
+      this.applyActionMask(action);
+    }
     return action;
   }
 
@@ -180,11 +199,22 @@ export class DrawingStore {
     startWidth: number,
     endWidth: number,
   ): void {
-    this.tree = this.tree.paintSegment(
+    if (!this.actionStart || !this.actionMask) return;
+    this.actionMask = this.actionMask.paintSegment(
       start,
       end,
       startWidth,
       endWidth,
+      "#000000",
+      false,
+      action.density,
+    );
+  }
+
+  private applyActionMask(action: BrushAction): void {
+    if (!this.actionStart || !this.actionMask) return;
+    this.tree = this.actionStart.tree.applyMask(
+      this.actionMask,
       action.color,
       action.kind === "eraser",
     );
@@ -201,10 +231,13 @@ export class DrawingStore {
 
   private paintReadyStrokeSegments(action: BrushAction, flushTail: boolean): void {
     const lastReadySegment = action.points.length - (flushTail ? 2 : 3);
+    let painted = false;
     while (action.rasterizedSegments <= lastReadySegment) {
       this.paintCurveSegment(action, action.rasterizedSegments);
       action.rasterizedSegments += 1;
+      painted = true;
     }
+    if (painted) this.applyActionMask(action);
   }
 
   private paintCurveSegment(action: BrushAction, index: number): void {
@@ -258,6 +291,7 @@ export class DrawingStore {
     this.tree = state.tree;
     this.committedStrokeCount = state.strokeCount;
     this.actionStart = null;
+    this.actionMask = null;
   }
 
   private persist(): void {

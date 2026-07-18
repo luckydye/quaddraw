@@ -72,6 +72,61 @@ describe("RasterQuadTree", () => {
     expect(twice.snapshot()).toEqual(once.snapshot());
   });
 
+  test("uses brush density as paint opacity", () => {
+    const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#4c8deb",
+      false,
+      0.4,
+    );
+
+    expect(tree.allCells()).toHaveLength(1);
+    expect(tree.allCells()[0].color & 0xff).toBe(102);
+  });
+
+  test("composites a unioned stroke mask only once over another color", () => {
+    const empty = new RasterQuadTree(WORLD_BOUNDS);
+    const red = empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#f35b4c",
+      false,
+      0.5,
+    );
+    const mask = empty.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#000000",
+      false,
+      0.5,
+    );
+    const overlappingMask = mask.paintSegment(
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      100_000,
+      100_000,
+      "#000000",
+      false,
+      0.5,
+    );
+
+    const once = red.applyMask(mask, "#4c8deb");
+    const withOverlappingSegments = red.applyMask(overlappingMask, "#4c8deb");
+
+    expect(withOverlappingSegments.snapshot()).toEqual(once.snapshot());
+    expect(once.snapshot()).not.toEqual(red.snapshot());
+    const mixedColor = once.allCells()[0].color;
+    expect((mixedColor >>> 24) & 0xff).toBeGreaterThan(0x4c);
+    expect((mixedColor >>> 8) & 0xff).toBeLessThan(0xeb);
+  });
+
   test("aggregates subpixel branches when rendering zoomed out", () => {
     const tree = new RasterQuadTree(WORLD_BOUNDS).paintSegment(
       { x: -200, y: -100 },

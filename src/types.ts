@@ -28,6 +28,8 @@ export type BrushAction = {
   points: Point[];
   color: string;
   width: number;
+  /** Brush pigment density, expressed as a normalized opacity from 0 to 1. */
+  density: number;
   /** Number of transient input intervals already baked into the quadtree. */
   rasterizedSegments: number;
 };

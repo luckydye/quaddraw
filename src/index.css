@@ -182,7 +182,8 @@ button {
     height: 4px;
 }
 .weight-row output {
-    width: 31px;
+    width: 35px;
+    text-align: right;
     font-size: 10px;
     color: #77777c;
 }

@@ -20,6 +20,8 @@ const elements = {
   snapshotUncompressedSize: requiredElement<HTMLElement>("#snapshotUncompressedSize"),
   weight: requiredElement<HTMLInputElement>("#weight"),
   weightValue: requiredElement<HTMLOutputElement>("#weightValue"),
+  density: requiredElement<HTMLInputElement>("#density"),
+  densityValue: requiredElement<HTMLOutputElement>("#densityValue"),
   zoomLevel: requiredElement<HTMLButtonElement>("#zoomLevel"),
   debugTree: requiredElement<HTMLButtonElement>("#debugTree"),
   toast: requiredElement<HTMLElement>("#toast"),
@@ -146,7 +148,12 @@ function renderViewportPreview(): void {
 }
 
 function beginDrawing(point: Point): void {
-  currentAction = store.createStroke(point, activeColor, Number(elements.weight.value));
+  currentAction = store.createStroke(
+    point,
+    activeColor,
+    Number(elements.weight.value),
+    Number(elements.density.value) / 100,
+  );
   elements.hint.style.opacity = "0";
   render(true, false);
 }
@@ -241,6 +248,10 @@ function bindControls(): void {
 
   elements.weight.addEventListener("input", () => {
     elements.weightValue.textContent = `${elements.weight.value} px`;
+  });
+
+  elements.density.addEventListener("input", () => {
+    elements.densityValue.textContent = `${elements.density.value}%`;
   });
 
   document.querySelectorAll<HTMLButtonElement>("#swatches button").forEach((button) => {
