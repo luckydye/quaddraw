@@ -251,7 +251,22 @@ export class DrawingStore {
   }
 
   selectConnectedIslands(area: Bounds): RasterSelection | null {
-    return this.tree.connectedIslandsTouching(area);
+    const activeIndex = this.document.layers.findIndex(
+      ({ id }) => id === this.document.activeLayerId,
+    );
+    const layerIndexes: number[] = [];
+    for (let index = activeIndex; index >= 0; index -= 1) layerIndexes.push(index);
+    for (let index = activeIndex + 1; index < this.document.layers.length; index += 1) {
+      layerIndexes.push(index);
+    }
+    for (const index of layerIndexes) {
+      const layer = this.document.layers[index];
+      const selection = layer.tree.connectedIslandsTouching(area);
+      if (!selection) continue;
+      if (layer.id !== this.document.activeLayerId) this.setActiveLayer(layer.id);
+      return selection;
+    }
+    return null;
   }
 
   snapSelectionMovement(selection: RasterSelection, x: number, y: number): Point {

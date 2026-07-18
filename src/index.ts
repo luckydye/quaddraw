@@ -411,7 +411,9 @@ function finishInteraction(completeSelection = true): void {
   if (selectionStart) {
     if (completeSelection) {
       const area = selectionHitArea(selectionMarquee ?? boundsFromPoints(selectionStart, selectionStart));
+      const previousLayerId = store.activeLayerId;
       selection = store.selectConnectedIslands(area);
+      if (store.activeLayerId !== previousLayerId) renderLayerPanel();
       if (selection) {
         showToast(`${selection.islandCount} ink island${selection.islandCount === 1 ? "" : "s"} selected`);
       }

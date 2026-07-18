@@ -25,9 +25,12 @@ their transparent siblings.
 The Select tool (`V`) treats the raster topology as 8-connected ink islands.
 Dragging a marquee selects every complete island touched by it, including ink
 outside the marquee; overlapping strokes form one island because vector stroke
-identity is intentionally not retained. Dragging inside the selected bounds
-moves the ink as one undoable cut-and-composite operation, snapped to the
-quadtree's finest raster grid to preserve crisp cell coverage.
+identity is intentionally not retained. If the active layer has no matching
+ink, selection continues down through the layers, then searches the layers
+above the original active layer if it reaches the bottom without a match. The
+first matching layer is activated. Dragging inside the selected bounds moves
+the ink as one undoable cut-and-composite operation, snapped to the quadtree's
+finest raster grid to preserve crisp cell coverage.
 
 ## Development
 
