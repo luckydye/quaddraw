@@ -754,9 +754,12 @@ function bindCanvasEvents(): void {
 
     if (currentAction) {
       const coalescedEvents = event.getCoalescedEvents?.() ?? [event];
-      for (const coalescedEvent of coalescedEvents) {
-        store.appendPoint(currentAction, renderer.screenToWorld(coalescedEvent, camera));
-      }
+      store.appendPoints(
+        currentAction,
+        coalescedEvents.map((coalescedEvent) => (
+          renderer.screenToWorld(coalescedEvent, camera)
+        )),
+      );
       renderActionRegion();
       return;
     }

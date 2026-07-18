@@ -13,7 +13,7 @@ const TAG_TRANSPARENT = 0;
 const TAG_BRANCH = 1;
 const TAG_PALETTE = 2;
 const TAG_RAW_COLOR = 3;
-const ENCODE_BATCH_SIZE = 4_096;
+const ENCODE_BATCH_SIZE = 8_192;
 
 type StoredSnapshot = {
   blob: Blob;
@@ -41,11 +41,20 @@ export type DecodedDrawing = {
 };
 
 /** Persists layer metadata and quadtree raster values—never input paths. */
-export async function saveDrawing(document: DrawingDocument): Promise<SnapshotSizes | null> {
+export async function saveDrawing(
+  document: DrawingDocument,
+  shouldContinue: () => boolean = () => true,
+): Promise<SnapshotSizes | null> {
   try {
-    const bytes = await encodeDrawingIncrementally(document);
+    const bytes = await encodeDrawingIncrementally(document, shouldContinue);
+    if (!bytes || !shouldContinue()) return null;
     const snapshot = await compress(bytes);
+    if (!shouldContinue()) return null;
     const database = await openDatabase();
+    if (!shouldContinue()) {
+      database.close();
+      return null;
+    }
     await writeSnapshot(database, snapshot);
     database.close();
     return { compressedBytes: snapshot.blob.size, uncompressedBytes: bytes.byteLength };
@@ -187,31 +196,43 @@ export function encodeDrawing(document: DrawingDocument): Uint8Array {
 /** Produces the layered snapshot while yielding between tree batches. */
 export async function encodeDrawingIncrementally(
   document: DrawingDocument,
-): Promise<Uint8Array> {
+  shouldContinue: () => boolean = () => true,
+): Promise<Uint8Array | null> {
   const writer = new BinaryWriter();
   writeDocumentHeader(writer, document);
   for (const layer of document.layers) {
+    if (!shouldContinue()) return null;
     writeLayerHeader(writer, layer);
-    const nodes = await collectNodesIncrementally(layer.tree.snapshot());
-    await writePackedTreeIncrementally(writer, nodes);
+    if (!await writePackedTreeIncrementally(writer, layer.tree.snapshot(), shouldContinue)) {
+      return null;
+    }
   }
-  return writer.toBytes();
+  return shouldContinue() ? writer.toBytes() : null;
 }
 
-async function collectNodesIncrementally(root: QuadNode): Promise<QuadNode[]> {
-  const nodes: QuadNode[] = [];
+async function visitNodesIncrementally(
+  root: QuadNode,
+  visit: (node: QuadNode, index: number) => void,
+  shouldContinue: () => boolean,
+): Promise<number | null> {
   const pending = [root];
+  let count = 0;
   while (pending.length > 0) {
+    if (!shouldContinue()) return null;
     const node = pending.pop()!;
-    nodes.push(node);
+    visit(node, count);
+    count += 1;
     if (node.children) {
       for (let index = node.children.length - 1; index >= 0; index--) {
         pending.push(node.children[index]);
       }
     }
-    if (nodes.length % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
+    if (count % ENCODE_BATCH_SIZE === 0) {
+      await yieldToMainThread();
+      if (!shouldContinue()) return null;
+    }
   }
-  return nodes;
+  return count;
 }
 
 function writeDocumentHeader(writer: BinaryWriter, document: DrawingDocument): void {
@@ -246,7 +267,7 @@ function writePackedTree(writer: BinaryWriter, nodes: readonly QuadNode[]): void
   nodes.forEach((node, index) => {
     tags[index >> 2] |= nodeTag(node, paletteIndices) << ((index & 3) * 2);
   });
-  tags.forEach((tag) => writer.writeUint8(tag));
+  writer.writeBytes(tags);
   nodes.forEach((node) => {
     if (node.color !== undefined && (node.color & 0xff) !== 0) {
       const paletteIndex = paletteIndices.get(node.color);
@@ -258,16 +279,17 @@ function writePackedTree(writer: BinaryWriter, nodes: readonly QuadNode[]): void
 
 async function writePackedTreeIncrementally(
   writer: BinaryWriter,
-  nodes: readonly QuadNode[],
-): Promise<void> {
+  root: QuadNode,
+  shouldContinue: () => boolean,
+): Promise<boolean> {
   const frequencies = new Map<number, number>();
-  for (let index = 0; index < nodes.length; index++) {
-    const color = nodes[index].color;
+  const nodeCount = await visitNodesIncrementally(root, (node) => {
+    const color = node.color;
     if (color !== undefined && (color & 0xff) !== 0) {
       frequencies.set(color, (frequencies.get(color) ?? 0) + 1);
     }
-    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
-  }
+  }, shouldContinue);
+  if (nodeCount === null) return false;
   const entries: [number, number][] = [];
   frequencies.forEach((frequency, color) => entries.push([color, frequency]));
   const palette = entries
@@ -278,26 +300,22 @@ async function writePackedTreeIncrementally(
   const paletteIndices = new Map(palette.map((color, index) => [color, index]));
   writer.writeUint16(palette.length);
   palette.forEach((color) => writer.writeUint32(color));
-  writer.writeUint32(nodes.length);
+  writer.writeUint32(nodeCount);
 
-  const tags = new Uint8Array(Math.ceil(nodes.length / 4));
-  for (let index = 0; index < nodes.length; index++) {
-    tags[index >> 2] |= nodeTag(nodes[index], paletteIndices) << ((index & 3) * 2);
-    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
-  }
-  for (let index = 0; index < tags.length; index++) {
-    writer.writeUint8(tags[index]);
-    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
-  }
-  for (let index = 0; index < nodes.length; index++) {
-    const node = nodes[index];
+  const tags = new Uint8Array(Math.ceil(nodeCount / 4));
+  await visitNodesIncrementally(root, (node, index) => {
+    tags[index >> 2] |= nodeTag(node, paletteIndices) << ((index & 3) * 2);
+  }, shouldContinue);
+  if (!shouldContinue()) return false;
+  writer.writeBytes(tags);
+  await visitNodesIncrementally(root, (node) => {
     if (node.color !== undefined && (node.color & 0xff) !== 0) {
       const paletteIndex = paletteIndices.get(node.color);
       if (paletteIndex === undefined) writer.writeUint32(node.color);
       else writer.writeUint8(paletteIndex);
     }
-    if (index > 0 && index % ENCODE_BATCH_SIZE === 0) await yieldToMainThread();
-  }
+  }, shouldContinue);
+  return shouldContinue();
 }
 
 function yieldToMainThread(): Promise<void> {
@@ -450,10 +468,35 @@ class BinaryWriter {
   private view = new DataView(this.buffer);
   private position = 0;
 
-  writeUint8(value: number): void { this.writeNumber(1, (view, offset) => view.setUint8(offset, value)); }
-  writeUint16(value: number): void { this.writeNumber(2, (view, offset) => view.setUint16(offset, value, true)); }
-  writeUint32(value: number): void { this.writeNumber(4, (view, offset) => view.setUint32(offset, value, true)); }
-  writeFloat32(value: number): void { this.writeNumber(4, (view, offset) => view.setFloat32(offset, value, true)); }
+  writeUint8(value: number): void {
+    this.ensureCapacity(1);
+    this.view.setUint8(this.position, value);
+    this.position += 1;
+  }
+
+  writeUint16(value: number): void {
+    this.ensureCapacity(2);
+    this.view.setUint16(this.position, value, true);
+    this.position += 2;
+  }
+
+  writeUint32(value: number): void {
+    this.ensureCapacity(4);
+    this.view.setUint32(this.position, value, true);
+    this.position += 4;
+  }
+
+  writeFloat32(value: number): void {
+    this.ensureCapacity(4);
+    this.view.setFloat32(this.position, value, true);
+    this.position += 4;
+  }
+
+  writeBytes(bytes: Uint8Array): void {
+    this.ensureCapacity(bytes.byteLength);
+    new Uint8Array(this.buffer, this.position, bytes.byteLength).set(bytes);
+    this.position += bytes.byteLength;
+  }
 
   writeString(value: string): void {
     const bytes = new TextEncoder().encode(value);
@@ -465,12 +508,6 @@ class BinaryWriter {
   }
 
   toBytes(): Uint8Array { return new Uint8Array(this.buffer, 0, this.position); }
-
-  private writeNumber(length: number, write: (view: DataView, offset: number) => void): void {
-    this.ensureCapacity(length);
-    write(this.view, this.position);
-    this.position += length;
-  }
 
   private ensureCapacity(required: number): void {
     if (this.position + required <= this.buffer.byteLength) return;

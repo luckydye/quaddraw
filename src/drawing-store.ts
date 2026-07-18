@@ -42,7 +42,7 @@ const CURVE_FLATNESS = 0.2;
 const MAX_CURVE_DEPTH = 8;
 const PRESSURE_SAMPLE_DELTA = 0.015;
 const PRESSURE_RESPONSE_DELTA = 0.5;
-const PERSISTENCE_DEBOUNCE_MS = 750;
+const PERSISTENCE_DEBOUNCE_MS = 2_000;
 
 /** Owns layer edits, brush transactions, history, and sparse raster trees. */
 export class DrawingStore {
@@ -59,6 +59,7 @@ export class DrawingStore {
   private persistenceWriting = false;
   private persistencePending = false;
   private persistenceNotBefore = 0;
+  private persistenceGeneration = 0;
   private occupiedResolutionQueued = false;
   private persistedSnapshotSizes: SnapshotSizes = { compressedBytes: 0, uncompressedBytes: 0 };
   private occupiedResolutionValue = { width: 0, height: 0 };
@@ -90,6 +91,19 @@ export class DrawingStore {
   }
 
   appendPoint(action: BrushAction, point: Point): void {
+    this.appendPoints(action, [point]);
+  }
+
+  /** Applies one browser input batch to the gesture mask before compositing it. */
+  appendPoints(action: BrushAction, points: readonly Point[]): void {
+    let painted = false;
+    for (const point of points) {
+      painted = this.appendPointToMask(action, point) || painted;
+    }
+    if (painted) this.applyActionMask(action);
+  }
+
+  private appendPointToMask(action: BrushAction, point: Point): boolean {
     const previousPoint = action.points[action.points.length - 1];
     const movementDistance = Math.hypot(point.x - previousPoint.x, point.y - previousPoint.y);
     const pressureChange = point.pressure === undefined || previousPoint.pressure === undefined
@@ -99,12 +113,11 @@ export class DrawingStore {
       action.kind === "stroke"
       && movementDistance < MINIMUM_POINT_DISTANCE
       && pressureChange < PRESSURE_SAMPLE_DELTA
-    ) return;
+    ) return false;
     action.points.push(point);
 
     if (action.kind === "stroke" && action.points[0].strength === undefined) {
-      if (initialVelocityIsReady(action)) this.paintBufferedStrokeStart(action);
-      return;
+      return initialVelocityIsReady(action) && this.paintBufferedStrokeStart(action);
     }
 
     if (action.kind === "stroke") {
@@ -121,8 +134,7 @@ export class DrawingStore {
         -movementDistance / responseDistance - pressureChange / PRESSURE_RESPONSE_DELTA,
       );
       point.strength = previousPoint.strength! + (targetWidth - previousPoint.strength!) * response;
-      this.paintReadyStrokeSegments(action, false);
-      return;
+      return this.paintReadyStrokeSegments(action, false);
     }
     this.paint(
       previousPoint,
@@ -131,11 +143,12 @@ export class DrawingStore {
       previousPoint.strength ?? action.width,
       point.strength ?? action.width,
     );
-    this.applyActionMask(action);
+    return true;
   }
 
   commit(action: BrushAction): void {
     if (!this.actionStart) return;
+    let painted = false;
     if (action.kind === "stroke" && action.points[0].strength === undefined) {
       if (action.points.length === 1) {
         // A tap never produces a velocity sample, so commit a neutral-width dot.
@@ -147,14 +160,15 @@ export class DrawingStore {
         );
         action.points[0].strength = tapWidth;
         this.paint(action.points[0], action.points[0], action, tapWidth, tapWidth);
-        this.applyActionMask(action);
+        painted = true;
       } else {
-        this.paintBufferedStrokeStart(action);
+        painted = this.paintBufferedStrokeStart(action);
       }
     }
     if (action.kind === "stroke" && action.points.length > 1) {
-      this.paintReadyStrokeSegments(action, true);
+      painted = this.paintReadyStrokeSegments(action, true) || painted;
     }
+    if (painted) this.applyActionMask(action);
     if (this.document === this.actionStart.document) {
       this.actionStart = null;
       this.actionMask = null;
@@ -172,7 +186,7 @@ export class DrawingStore {
     this.actionStart = null;
     this.actionMask = null;
     this.actionLayerId = null;
-    this.updateOccupiedResolution();
+    this.queueOccupiedResolutionUpdate();
     this.persist();
   }
 
@@ -438,7 +452,17 @@ export class DrawingStore {
     textureSeed: number,
     dynamics: number,
   ): BrushAction {
+    // If a debounced snapshot is waiting, keep it out of the input-critical
+    // part of the next gesture. The write will resume after drawing is quiet.
+    this.persistenceNotBefore = Math.max(
+      this.persistenceNotBefore,
+      Date.now() + PERSISTENCE_DEBOUNCE_MS,
+    );
     if (!this.actionStart) {
+      // Cancel an older full-tree snapshot before it can compete with this
+      // gesture. Its replacement is queued after the gesture settles.
+      this.persistenceGeneration += 1;
+      if (this.persistenceWriting) this.persistencePending = true;
       this.actionStart = this.currentState();
       this.actionMask = new RasterQuadTree(WORLD_BOUNDS);
       this.actionLayerId = this.document.activeLayerId;
@@ -506,11 +530,14 @@ export class DrawingStore {
   private applyActionMask(action: BrushAction): void {
     if (!this.actionStart || !this.actionMask || this.actionLayerId === null) return;
     const baseLayer = this.actionStart.document.layers.find(({ id }) => id === this.actionLayerId);
-    if (!baseLayer) return;
-    const tree = baseLayer.tree.applyMask(
+    const previousLayer = this.document.layers.find(({ id }) => id === this.actionLayerId);
+    if (!baseLayer || !previousLayer || !this.actionDirtyBounds) return;
+    const tree = baseLayer.tree.applyMaskRegion(
       this.actionMask,
       action.color,
       action.kind === "eraser",
+      this.actionDirtyBounds,
+      previousLayer.tree,
     );
     const nextDocument = replaceLayer(this.actionStart.document, this.actionLayerId, (layer) => (
       tree === layer.tree ? layer : { ...layer, tree }
@@ -521,7 +548,7 @@ export class DrawingStore {
     }
   }
 
-  private paintBufferedStrokeStart(action: BrushAction): void {
+  private paintBufferedStrokeStart(action: BrushAction): boolean {
     const initialWidth = bufferedVelocityWidth(action);
 
     // Use the look-ahead measurement for the whole startup window. Replaying
@@ -534,10 +561,10 @@ export class DrawingStore {
         action.dynamics,
       );
     });
-    this.paintReadyStrokeSegments(action, false);
+    return this.paintReadyStrokeSegments(action, false);
   }
 
-  private paintReadyStrokeSegments(action: BrushAction, flushTail: boolean): void {
+  private paintReadyStrokeSegments(action: BrushAction, flushTail: boolean): boolean {
     const lastReadySegment = action.points.length - (flushTail ? 2 : 3);
     let painted = false;
     while (action.rasterizedSegments <= lastReadySegment) {
@@ -545,7 +572,7 @@ export class DrawingStore {
       action.rasterizedSegments += 1;
       painted = true;
     }
-    if (painted) this.applyActionMask(action);
+    return painted;
   }
 
   private paintCurveSegment(action: BrushAction, index: number): void {
@@ -654,6 +681,7 @@ export class DrawingStore {
   }
 
   private persist(): void {
+    this.persistenceGeneration += 1;
     this.persistencePending = true;
     this.persistenceNotBefore = Date.now() + PERSISTENCE_DEBOUNCE_MS;
     if (this.persistenceQueued || this.persistenceWriting) return;
@@ -679,7 +707,11 @@ export class DrawingStore {
     if (this.persistenceWriting) return;
     this.persistenceWriting = true;
     this.persistencePending = false;
-    const snapshotSizes = await saveDrawing(this.document);
+    const generation = this.persistenceGeneration;
+    const snapshotSizes = await saveDrawing(
+      this.document,
+      () => generation === this.persistenceGeneration && this.actionStart === null,
+    );
     if (snapshotSizes !== null) this.setSnapshotSizes(snapshotSizes);
     this.persistenceWriting = false;
     if (this.persistencePending) this.persist();

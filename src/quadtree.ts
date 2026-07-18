@@ -115,6 +115,33 @@ export class RasterQuadTree {
     return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
   }
 
+  /**
+   * Recomputes a changed part of a gesture mask against its original base while
+   * retaining the already-composited result everywhere else. This preserves
+   * once-per-gesture blending without walking the gesture's entire history for
+   * every new pointer sample.
+   */
+  applyMaskRegion(
+    mask: RasterQuadTree,
+    color: string,
+    erase: boolean,
+    area: Bounds,
+    previous: RasterQuadTree,
+  ): RasterQuadTree {
+    const nextRoot = applyMaskNodeInArea(
+      this.root,
+      mask.root,
+      previous.root,
+      colorFromHex(color),
+      erase,
+      this.bounds,
+      area,
+    );
+    return nextRoot === previous.root
+      ? previous
+      : new RasterQuadTree(this.bounds, nextRoot);
+  }
+
   cellsIn(area: Bounds): RasterCell[] {
     const cells: RasterCell[] = [];
     collectCells(
@@ -359,25 +386,23 @@ function paintNode(
     ? maximumBaseRadius * CHARCOAL_RADIUS_VARIATION_MAX
       + charcoalFeatherWidth(maximumBaseRadius) * CHARCOAL_FEATHER_OUTSET
     : maximumBaseRadius;
-  const minimumDistance = Math.sqrt(distanceSquaredSegmentToRect(start, end, bounds));
-  if (minimumDistance > maximumRadius + 0.5) {
+  const maximumReach = maximumRadius + 0.5;
+  if (distanceSquaredSegmentToRect(start, end, bounds) > maximumReach * maximumReach) {
     return node;
   }
 
-  const maximumDistance = maximumCornerDistance(start, end, bounds);
-  const minimumRadius = Math.min(startRadius, endRadius);
-  if (
-    texture === "solid"
-    && startDensity === endDensity
-    && maximumDistance <= Math.max(0, minimumRadius - 0.5)
-  ) {
-    if (erase || startDensity === 1) {
-      const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
-      return node.color === replacement ? node : uniform(replacement);
-    }
-    if (!isBranchNode(node)) {
-      const replacement = composite(node.color, paintColor, startDensity, false);
-      return node.color === replacement ? node : uniform(replacement);
+  if (texture === "solid" && startDensity === endDensity) {
+    const maximumDistance = maximumCornerDistance(start, end, bounds);
+    const minimumRadius = Math.min(startRadius, endRadius);
+    if (maximumDistance <= Math.max(0, minimumRadius - 0.5)) {
+      if (erase || startDensity === 1) {
+        const replacement = erase ? TRANSPARENT : withAlpha(paintColor, 255);
+        return node.color === replacement ? node : uniform(replacement);
+      }
+      if (!isBranchNode(node)) {
+        const replacement = composite(node.color, paintColor, startDensity, false);
+        return node.color === replacement ? node : uniform(replacement);
+      }
     }
   }
 
@@ -762,6 +787,78 @@ function applyMaskNode(base: QuadNode, mask: QuadNode, paintColor: number, erase
     return uniform(firstColor);
   }
   return createBranchNode(children);
+}
+
+function applyMaskNodeInArea(
+  base: QuadNode,
+  mask: QuadNode,
+  previous: QuadNode,
+  paintColor: number,
+  erase: boolean,
+  bounds: Bounds,
+  area: Bounds,
+): QuadNode {
+  if (!boundsIntersect(bounds, area)) return previous;
+  if (boundsContain(area, bounds)) {
+    return applyMaskNode(base, mask, paintColor, erase);
+  }
+
+  // A finest-level leaf cannot be split further. Brush dirty bounds include
+  // every changed raster cell, so recomputing this whole leaf is safe.
+  if (
+    !isBranchNode(base)
+    && !isBranchNode(mask)
+    && !isBranchNode(previous)
+  ) {
+    return applyMaskNode(base, mask, paintColor, erase);
+  }
+
+  const baseChildren = base.children ?? [base, base, base, base];
+  const maskChildren = mask.children ?? [mask, mask, mask, mask];
+  const previousChildren = previous.children ?? [previous, previous, previous, previous];
+  const halfWidth = bounds.width / 2;
+  const halfHeight = bounds.height / 2;
+  const childBounds: [Bounds, Bounds, Bounds, Bounds] = [
+    { x: bounds.x, y: bounds.y, width: halfWidth, height: halfHeight },
+    { x: bounds.x + halfWidth, y: bounds.y, width: halfWidth, height: halfHeight },
+    { x: bounds.x, y: bounds.y + halfHeight, width: halfWidth, height: halfHeight },
+    {
+      x: bounds.x + halfWidth,
+      y: bounds.y + halfHeight,
+      width: halfWidth,
+      height: halfHeight,
+    },
+  ];
+  const children = previousChildren.map((child, index) => applyMaskNodeInArea(
+    baseChildren[index],
+    maskChildren[index],
+    child,
+    paintColor,
+    erase,
+    childBounds[index],
+    area,
+  )) as [QuadNode, QuadNode, QuadNode, QuadNode];
+
+  if (children.every((child, index) => child === previousChildren[index])) return previous;
+  const firstColor = children[0].color;
+  if (firstColor !== undefined && children.every((child) => child.color === firstColor)) {
+    return uniform(firstColor);
+  }
+  return createBranchNode(children);
+}
+
+function boundsIntersect(left: Bounds, right: Bounds): boolean {
+  return left.x < right.x + right.width
+    && left.x + left.width > right.x
+    && left.y < right.y + right.height
+    && left.y + left.height > right.y;
+}
+
+function boundsContain(container: Bounds, contained: Bounds): boolean {
+  return contained.x >= container.x
+    && contained.y >= container.y
+    && contained.x + contained.width <= container.x + container.width
+    && contained.y + contained.height <= container.y + container.height;
 }
 
 function collectCells(

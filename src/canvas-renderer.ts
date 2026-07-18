@@ -102,7 +102,10 @@ export class CanvasRenderer {
 
   resize(): void {
     const bounds = this.area.getBoundingClientRect();
-    const scale = window.devicePixelRatio;
+    // A full iPad DPR backing store quadruples the pixels touched by every 2D
+    // canvas update. WebKit's canvas compositor does not reliably retain dirty
+    // tiles, so prefer CSS-pixel resolution there to keep interaction fluid.
+    const scale = isAppleTouchDevice() ? 1 : window.devicePixelRatio;
     this.canvasLeft = bounds.left;
     this.canvasTop = bounds.top;
     this.pixelScale = scale;
@@ -113,8 +116,8 @@ export class CanvasRenderer {
     this.debugFlashCanvas.height = bounds.height * scale;
     this.debugFlashContext.setTransform(scale, 0, 0, scale, 0, 0);
     this.clearDebugFlash();
-    this.cacheMarginX = bounds.width * CACHE_MARGIN_FACTOR;
-    this.cacheMarginY = bounds.height * CACHE_MARGIN_FACTOR;
+    this.cacheMarginX = Math.ceil(bounds.width * CACHE_MARGIN_FACTOR * scale) / scale;
+    this.cacheMarginY = Math.ceil(bounds.height * CACHE_MARGIN_FACTOR * scale) / scale;
     this.cacheWidth = bounds.width + this.cacheMarginX * 2;
     this.cacheHeight = bounds.height + this.cacheMarginY * 2;
     this.committedTreeCanvas.width = this.cacheWidth * scale;
@@ -218,9 +221,11 @@ export class CanvasRenderer {
     // flight. Ignore that bitmap so it cannot overwrite the patched stroke.
     this.renderRequestId += 1;
     this.pendingWorkerRender = null;
+    const patches: Bounds[] = [];
     for (const { cells, debugRegions, worldBounds } of regions) {
       const patch = this.committedDevicePixelPatch(worldBounds);
       if (!patch) continue;
+      patches.push(patch);
 
       this.committedTreeContext.save();
       // Incremental world-space clips usually land between device pixels. The
@@ -259,18 +264,74 @@ export class CanvasRenderer {
       if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
     }
 
-    this.render(
-      camera,
-      [],
-      [],
-      false,
-      this.committedWorldBounds,
-      selection,
-      marquee,
-      null,
-      selectionOffset,
-    );
+    if (!selection && !marquee) {
+      this.compositeCommittedPatches(patches);
+    } else {
+      this.render(
+        camera,
+        [],
+        [],
+        false,
+        this.committedWorldBounds,
+        selection,
+        marquee,
+        null,
+        selectionOffset,
+      );
+    }
     return true;
+  }
+
+  /** Copies only changed backing pixels during a fixed-camera brush gesture. */
+  private compositeCommittedPatches(patches: readonly Bounds[]): void {
+    if (patches.length === 0) return;
+    const marginX = this.cacheMarginX * this.pixelScale;
+    const marginY = this.cacheMarginY * this.pixelScale;
+
+    this.treeContext.save();
+    this.treeContext.setTransform(1, 0, 0, 1, 0, 0);
+    this.context.save();
+    this.context.setTransform(1, 0, 0, 1, 0, 0);
+    for (const patch of patches) {
+      const destinationX = patch.x - marginX;
+      const destinationY = patch.y - marginY;
+      const left = Math.max(0, destinationX);
+      const top = Math.max(0, destinationY);
+      const right = Math.min(this.treeCanvas.width, destinationX + patch.width);
+      const bottom = Math.min(this.treeCanvas.height, destinationY + patch.height);
+      if (right <= left || bottom <= top) continue;
+
+      const width = right - left;
+      const height = bottom - top;
+      const sourceX = patch.x + left - destinationX;
+      const sourceY = patch.y + top - destinationY;
+      this.treeContext.clearRect(left, top, width, height);
+      this.treeContext.drawImage(
+        this.committedTreeCanvas,
+        sourceX,
+        sourceY,
+        width,
+        height,
+        left,
+        top,
+        width,
+        height,
+      );
+      this.context.clearRect(left, top, width, height);
+      this.context.drawImage(
+        this.treeCanvas,
+        left,
+        top,
+        width,
+        height,
+        left,
+        top,
+        width,
+        height,
+      );
+    }
+    this.context.restore();
+    this.treeContext.restore();
   }
 
   /** Returns the wholly covered physical pixels inside a world-space patch. */
@@ -497,6 +558,11 @@ export class CanvasRenderer {
   private initializeRenderWorker(): void {
     if (typeof OffscreenCanvas === "undefined" || typeof Worker === "undefined") return;
     if (!("transferToImageBitmap" in OffscreenCanvas.prototype)) return;
+    // Safari currently copies large OffscreenCanvas ImageBitmaps during
+    // postMessage and then stalls again while compositing them. On an iPad-sized
+    // high-DPI cache those two steps can each take about a second, making the
+    // nominally off-thread path substantially worse than direct rasterization.
+    if (hasSlowWebKitImageBitmapTransfer()) return;
 
     try {
       const worker = createRenderWorker();
@@ -1069,6 +1135,18 @@ function sameCamera(left: Camera, right: Camera | null): boolean {
     && left.x === right.x
     && left.y === right.y
     && left.zoom === right.zoom;
+}
+
+function hasSlowWebKitImageBitmapTransfer(): boolean {
+  const userAgent = navigator.userAgent;
+  const safari = /\bSafari\//.test(userAgent)
+    && !/\b(?:Chrome|Chromium|CriOS|Edg|EdgiOS|OPR|FxiOS)\//.test(userAgent);
+  return isAppleTouchDevice() || safari;
+}
+
+function isAppleTouchDevice(): boolean {
+  return /\b(?:iPad|iPhone|iPod)\b/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
 function packCells(cells: readonly RasterCell[]): ArrayBuffer {
