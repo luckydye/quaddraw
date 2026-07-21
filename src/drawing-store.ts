@@ -28,6 +28,7 @@ import { WORLD_BOUNDS } from "./types";
 
 type DrawingState = {
   document: DrawingDocument;
+  selectionShape: readonly Point[] | null;
 };
 
 const SLOW_WIDTH_FACTOR = 1.8;
@@ -56,6 +57,7 @@ export class DrawingStore {
   private actionLayerId: LayerId | null = null;
   private actionDirtyBounds: Bounds | null = null;
   private actionBounds: Bounds | null = null;
+  private selectionShapeValue: readonly Point[] | null = null;
   private persistenceQueued = false;
   private persistenceWriting = false;
   private persistencePending = false;
@@ -218,7 +220,10 @@ export class DrawingStore {
   }
 
   clear(): void {
-    if (this.strokeCount === 0 && this.nodeCount === this.document.layers.length) return;
+    if (this.strokeCount === 0 && this.nodeCount === this.document.layers.length) {
+      this.setSelection(null);
+      return;
+    }
     this.undoStack.push(this.currentState());
     this.redoStack = [];
     this.document = {
@@ -229,6 +234,7 @@ export class DrawingStore {
         strokeCount: 0,
       })),
     };
+    this.selectionShapeValue = null;
     this.visualRevisionValue += 1;
     this.actionStart = null;
     this.actionMask = null;
@@ -327,6 +333,23 @@ export class DrawingStore {
     return null;
   }
 
+  /** The active selection shape, or null. Also clips subsequent brush and eraser strokes. */
+  get selectionShape(): readonly Point[] | null {
+    return this.selectionShapeValue;
+  }
+
+  /**
+   * Replaces the active selection shape (or clears it with `null`), as its own
+   * undoable step — so deselecting can be undone back to the prior selection.
+   */
+  setSelection(points: readonly Point[] | null): void {
+    const normalized = points && points.length >= 3 ? points : null;
+    if (normalized === this.selectionShapeValue) return;
+    this.undoStack.push(this.currentState());
+    this.redoStack = [];
+    this.selectionShapeValue = normalized;
+  }
+
   snapSelectionMovement(selection: RasterSelection, x: number, y: number): Point {
     const minimumX = WORLD_BOUNDS.x - selection.bounds.x;
     const maximumX = WORLD_BOUNDS.x + WORLD_BOUNDS.width
@@ -340,15 +363,23 @@ export class DrawingStore {
     );
   }
 
+  /** Moves the selected cells and clears the selection, as one undoable step. */
   moveSelection(selection: RasterSelection, x: number, y: number): RasterSelection | null {
     const offset = this.snapSelectionMovement(selection, x, y);
-    if (offset.x === 0 && offset.y === 0) return selection;
+    if (offset.x === 0 && offset.y === 0) {
+      this.setSelection(null);
+      return selection;
+    }
     const moved = this.tree.moveSelection(selection, offset.x, offset.y);
-    if (moved.tree === this.tree) return selection;
+    if (moved.tree === this.tree) {
+      this.setSelection(null);
+      return selection;
+    }
 
     this.undoStack.push(this.currentState());
     this.redoStack = [];
     this.tree = moved.tree;
+    this.selectionShapeValue = null;
     this.queueOccupiedResolutionUpdate();
     this.persist();
 
@@ -564,8 +595,11 @@ export class DrawingStore {
     const baseLayer = this.actionStart.document.layers.find(({ id }) => id === this.actionLayerId);
     const previousLayer = this.document.layers.find(({ id }) => id === this.actionLayerId);
     if (!baseLayer || !previousLayer || !this.actionDirtyBounds) return;
+    const mask = this.selectionShapeValue
+      ? this.actionMask.clipToPolygon(this.selectionShapeValue)
+      : this.actionMask;
     const tree = baseLayer.tree.applyMaskRegion(
-      this.actionMask,
+      mask,
       action.color,
       action.kind === "eraser",
       this.actionDirtyBounds,
@@ -663,11 +697,12 @@ export class DrawingStore {
   }
 
   private currentState(): DrawingState {
-    return { document: this.document };
+    return { document: this.document, selectionShape: this.selectionShapeValue };
   }
 
   private restoreState(state: DrawingState): void {
     this.document = state.document;
+    this.selectionShapeValue = state.selectionShape;
     this.visualRevisionValue += 1;
     this.actionStart = null;
     this.actionMask = null;

@@ -253,7 +253,7 @@ button {
 }
 .inspector {
     position: absolute;
-    right: 21px;
+    right: 0.5rem;
     top: 20px;
     width: 218px;
     padding: 14px 15px 15px;
@@ -577,7 +577,7 @@ button {
 }
 .zoom-controls {
     position: absolute;
-    bottom: 18px;
+    bottom: 0.5rem;
     left: 21px;
     display: flex;
     background: #fff;
@@ -601,8 +601,8 @@ button {
 }
 .minimap {
     position: absolute;
-    right: 21px;
-    bottom: 18px;
+    right: 0.5rem;
+    bottom: 0.5rem;
     width: 178px;
     height: 113px;
     overflow: hidden;
@@ -628,9 +628,8 @@ button {
 .statusbar {
     height: 35px;
     flex: 0 0 35px;
-    padding: 0 16px 0 20px;
-    border-top: 1px solid #e8e8e9;
-    background: #fff;
+    padding: 0 0.5rem 0 0.5rem;
+    background: #fbfbfb;
     justify-content: space-between;
     display: flex;
     color: #85858b;

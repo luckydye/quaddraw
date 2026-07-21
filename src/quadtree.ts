@@ -143,6 +143,14 @@ export class RasterQuadTree {
       : new RasterQuadTree(this.bounds, nextRoot);
   }
 
+  /** Zeroes out mask coverage outside a selection shape, at leaf granularity. */
+  clipToPolygon(points: readonly Point[]): RasterQuadTree {
+    if (points.length < 3) return this;
+    const polygonBounds = enclosingPointBounds(points);
+    const nextRoot = clipMaskNodeToPolygon(this.root, this.bounds, 0, points, polygonBounds);
+    return nextRoot === this.root ? this : new RasterQuadTree(this.bounds, nextRoot);
+  }
+
   cellsIn(area: Bounds): RasterCell[] {
     const cells: RasterCell[] = [];
     this.visitRenderCells(area, 1, (x, y, width, height, color) =>
@@ -1449,7 +1457,63 @@ function rectangleIntersectsPolygon(rectangle: Bounds, polygon: readonly Point[]
   return false;
 }
 
-function pointInPolygon(point: Point, polygon: readonly Point[]): boolean {
+/** True only when the whole rectangle lies inside the polygon, with no boundary crossing. */
+function rectangleInsidePolygon(rectangle: Bounds, polygon: readonly Point[]): boolean {
+  const corners = rectangleCorners(rectangle);
+  if (!corners.every((corner) => pointInPolygon(corner, polygon))) return false;
+  if (polygon.some((point) => pointInRect(point, rectangle))) return false;
+  const rectangleEdges: readonly [Point, Point][] = [
+    [corners[0], corners[1]],
+    [corners[1], corners[3]],
+    [corners[3], corners[2]],
+    [corners[2], corners[0]],
+  ];
+  for (let index = 0; index < polygon.length; index++) {
+    const start = polygon[index];
+    const end = polygon[(index + 1) % polygon.length];
+    if (rectangleEdges.some(([edgeStart, edgeEnd]) => (
+      segmentsIntersect(start, end, edgeStart, edgeEnd)
+    ))) return false;
+  }
+  return true;
+}
+
+/**
+ * Zeroes mask coverage outside a selection polygon. Nodes fully inside or
+ * outside are kept or cleared whole; boundary-straddling nodes split down to
+ * finest-depth leaves (mirroring paintNode's own recursion), so a large
+ * uniform leaf the brush painted can't leak coverage past the polygon edge.
+ */
+function clipMaskNodeToPolygon(
+  node: QuadNode,
+  bounds: Bounds,
+  depth: number,
+  polygon: readonly Point[],
+  polygonBounds: Bounds,
+): QuadNode {
+  if (!rectanglesIntersect(bounds, polygonBounds) || !rectangleIntersectsPolygon(bounds, polygon)) {
+    return !isBranchNode(node) && node.color === TRANSPARENT ? node : uniform(TRANSPARENT);
+  }
+  if (rectangleInsidePolygon(bounds, polygon)) return node;
+  if (!isBranchNode(node) && (depth >= MAX_DEPTH || (bounds.width <= 1 && bounds.height <= 1))) {
+    return node;
+  }
+
+  const childBounds = splitBounds(bounds);
+  const nodeChildren = node.children ?? [node, node, node, node];
+  const children = nodeChildren.map((child, index) => (
+    clipMaskNodeToPolygon(child, childBounds[index], depth + 1, polygon, polygonBounds)
+  )) as [QuadNode, QuadNode, QuadNode, QuadNode];
+
+  if (children.every((child, index) => child === nodeChildren[index])) return node;
+  const firstColor = children[0].color;
+  if (firstColor !== undefined && children.every((child) => child.color === firstColor)) {
+    return uniform(firstColor);
+  }
+  return createBranchNode(children);
+}
+
+export function pointInPolygon(point: Point, polygon: readonly Point[]): boolean {
   let inside = false;
   for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
     const start = polygon[index];

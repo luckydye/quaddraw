@@ -69,7 +69,10 @@ export type RasterSelectionCell = RasterCell & {
   address: number;
 };
 
-/** Complete connected ink islands selected by a point or marquee query. */
+/**
+ * Complete connected ink islands resolved from a selection shape. Produced
+ * only transiently, at the moment a select-and-move drag begins.
+ */
 export type RasterSelection = {
   cells: RasterSelectionCell[];
   bounds: Bounds;

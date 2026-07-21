@@ -6,6 +6,7 @@ import {
   type GestureFrame,
 } from "./canvas-navigation";
 import { DrawingStore } from "./drawing-store";
+import { pointInPolygon } from "./quadtree";
 import type {
   Bounds,
   BrushAction,
@@ -89,7 +90,7 @@ let activeColor = "#393b42";
 let currentAction: BrushAction | null = null;
 let visibleDebugRegions: readonly QuadDebugRegion[] = [];
 let renderedWorldBounds: Bounds | null = null;
-let selection: RasterSelection | null = null;
+let activeMoveSelection: RasterSelection | null = null;
 let selectionStart: Point | null = null;
 let selectionMarquee: Bounds | null = null;
 let selectionLasso: Point[] | null = null;
@@ -203,13 +204,21 @@ function render(redrawTree = true, redrawMinimap = redrawTree): void {
       visibleDebugRegions,
       renderedWorldBounds,
       coversAllInk,
-      selection,
+      store.selectionShape,
+      activeMoveSelection,
       selectionMarquee,
       selectionLasso,
       selectionOffset,
     );
   } else {
-    renderer.redraw(camera, selection, selectionMarquee, selectionLasso, selectionOffset);
+    renderer.redraw(
+      camera,
+      store.selectionShape,
+      activeMoveSelection,
+      selectionMarquee,
+      selectionLasso,
+      selectionOffset,
+    );
   }
   if (redrawMinimap) {
     renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
@@ -385,10 +394,15 @@ function cancelCoverageRebuild(): void {
   coverageRebuildHandle = 0;
 }
 
+/** Clears the active selection, as its own undoable step. */
+function deselect(): void {
+  activeMoveSelection = null;
+  store.setSelection(null);
+}
+
 function beginDrawing(point: Point): void {
   window.clearTimeout(viewportSettleTimer);
   cancelCoverageRebuild();
-  selection = null;
   currentAction = store.createStroke(
     point,
     activeColor,
@@ -419,21 +433,26 @@ function finishInteraction(completeSelection = true): void {
   }
 
   if (selectionMoveStart) {
-    if (completeSelection && selection) {
-      selection = store.moveSelection(selection, selectionOffset.x, selectionOffset.y);
+    if (completeSelection && activeMoveSelection) {
+      // moveSelection clears the selection itself, bundled into the same
+      // undoable step as the move (see the "clears after move" behavior).
+      const moved = store.moveSelection(activeMoveSelection, selectionOffset.x, selectionOffset.y);
+      if (moved) {
+        showToast(`Moved ${moved.islandCount} ink island${moved.islandCount === 1 ? "" : "s"}`);
+      }
     }
+    activeMoveSelection = null;
     selectionMoveStart = null;
     selectionOffset = { x: 0, y: 0 };
   }
 
   if (selectionStart) {
     if (completeSelection) {
-      const area = selectionHitArea(selectionMarquee ?? boundsFromPoints(selectionStart, selectionStart));
-      const previousLayerId = store.activeLayerId;
-      selection = store.selectConnectedIslands(area);
-      if (store.activeLayerId !== previousLayerId) renderLayerPanel();
-      if (selection) {
-        showToast(`${selection.islandCount} ink island${selection.islandCount === 1 ? "" : "s"} selected`);
+      const bounds = selectionMarquee ?? boundsFromPoints(selectionStart, selectionStart);
+      if (bounds.width > 0 && bounds.height > 0) {
+        store.setSelection(polygonFromBounds(bounds));
+      } else {
+        deselect();
       }
     }
     selectionStart = null;
@@ -442,16 +461,10 @@ function finishInteraction(completeSelection = true): void {
 
   if (selectionLasso) {
     if (completeSelection) {
-      const previousLayerId = store.activeLayerId;
-      selection = selectionLasso.length >= 3
-        ? store.selectConnectedIslandsInPolygon(selectionLasso)
-        : store.selectConnectedIslands(selectionHitArea(boundsFromPoints(
-          selectionLasso[0],
-          selectionLasso[0],
-        )));
-      if (store.activeLayerId !== previousLayerId) renderLayerPanel();
-      if (selection) {
-        showToast(`${selection.islandCount} ink island${selection.islandCount === 1 ? "" : "s"} selected`);
+      if (selectionLasso.length >= 3) {
+        store.setSelection(selectionLasso);
+      } else {
+        deselect();
       }
     }
     selectionLasso = null;
@@ -545,23 +558,13 @@ function boundsFromPoints(first: Point, second: Point): Bounds {
   };
 }
 
-function selectionHitArea(bounds: Bounds): Bounds {
-  const minimumSize = 6 / camera.zoom;
-  const width = Math.max(bounds.width, minimumSize);
-  const height = Math.max(bounds.height, minimumSize);
-  return {
-    x: bounds.x - (width - bounds.width) / 2,
-    y: bounds.y - (height - bounds.height) / 2,
-    width,
-    height,
-  };
-}
-
-function pointInBounds(point: Point, bounds: Bounds): boolean {
-  return point.x >= bounds.x
-    && point.y >= bounds.y
-    && point.x <= bounds.x + bounds.width
-    && point.y <= bounds.y + bounds.height;
+function polygonFromBounds(bounds: Bounds): Point[] {
+  return [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+    { x: bounds.x, y: bounds.y + bounds.height },
+  ];
 }
 
 function showToast(message: string): void {
@@ -600,7 +603,7 @@ function renderLayerPanel(): void {
     visibility.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!store.setLayerVisibility(layer.id, !layer.visible)) return;
-      selection = null;
+      activeMoveSelection = null;
       render();
       renderLayerPanel();
     });
@@ -646,7 +649,7 @@ function renderLayerPanel(): void {
 function activateLayer(layerId: number, focusName = false): void {
   const changed = store.setActiveLayer(layerId);
   if (changed) {
-    selection = null;
+    activeMoveSelection = null;
     render(debugQuadtree, false);
     renderLayerPanel();
   }
@@ -662,7 +665,7 @@ function activateLayer(layerId: number, focusName = false): void {
 }
 
 function renderAfterLayerChange(message?: string): void {
-  selection = null;
+  activeMoveSelection = null;
   render();
   renderLayerPanel();
   if (message) showToast(message);
@@ -712,13 +715,20 @@ function bindCanvasEvents(): void {
     lastPointerPosition = { x: event.clientX, y: event.clientY };
 
     if ((activeTool === "select" || activeTool === "lasso") && !isSpacePressed) {
-      if (selection && pointInBounds(point, selection.bounds)) {
-        selectionMoveStart = point;
-        selectionOffset = { x: 0, y: 0 };
-        elements.area.classList.add("is-moving-selection");
-        return;
+      const shape = store.selectionShape;
+      if (shape && pointInPolygon(point, shape)) {
+        const previousLayerId = store.activeLayerId;
+        const resolved = store.selectConnectedIslandsInPolygon(shape);
+        if (store.activeLayerId !== previousLayerId) renderLayerPanel();
+        if (resolved) {
+          activeMoveSelection = resolved;
+          selectionMoveStart = point;
+          selectionOffset = { x: 0, y: 0 };
+          elements.area.classList.add("is-moving-selection");
+          return;
+        }
       }
-      selection = null;
+      deselect();
       if (activeTool === "lasso") selectionLasso = [point];
       else {
         selectionStart = point;
@@ -736,7 +746,6 @@ function bindCanvasEvents(): void {
     if (activeTool === "eraser" && !isSpacePressed) {
       window.clearTimeout(viewportSettleTimer);
       cancelCoverageRebuild();
-      selection = null;
       currentAction = store.createEraser(point, ERASER_WIDTH);
       renderActionRegion();
       return;
@@ -757,10 +766,10 @@ function bindCanvasEvents(): void {
       }
     }
 
-    if (selectionMoveStart && selection) {
+    if (selectionMoveStart && activeMoveSelection) {
       const point = renderer.screenToWorld(event, camera);
       selectionOffset = store.snapSelectionMovement(
-        selection,
+        activeMoveSelection,
         point.x - selectionMoveStart.x,
         point.y - selectionMoveStart.y,
       );
@@ -934,7 +943,7 @@ function bindControls(): void {
 
   requiredElement<HTMLButtonElement>("#undo").addEventListener("click", () => {
     if (store.undo()) {
-      selection = null;
+      activeMoveSelection = null;
       render();
       renderLayerPanel();
     }
@@ -942,14 +951,14 @@ function bindControls(): void {
 
   requiredElement<HTMLButtonElement>("#redo").addEventListener("click", () => {
     if (store.redo()) {
-      selection = null;
+      activeMoveSelection = null;
       render();
       renderLayerPanel();
     }
   });
 
   requiredElement<HTMLButtonElement>("#clearButton").addEventListener("click", () => {
-    selection = null;
+    activeMoveSelection = null;
     store.clear();
     render();
     showToast("Canvas cleared");
@@ -976,13 +985,12 @@ function bindKeyboardShortcuts(): void {
     if (event.key.toLowerCase() === "p") selectTool("pen");
     if (event.key.toLowerCase() === "e") selectTool("eraser");
     if (event.key.toLowerCase() === "h") selectTool("hand");
-    if (event.key.toLowerCase() === "v" && !event.metaKey && !event.ctrlKey) selectTool("select");
     if (event.key.toLowerCase() === "l" && !event.metaKey && !event.ctrlKey) selectTool("lasso");
     if (
       event.key === "Escape"
-      && (selection || selectionMarquee || selectionLasso || selectionMoveStart)
+      && (store.selectionShape || activeMoveSelection || selectionMarquee || selectionLasso || selectionMoveStart)
     ) {
-      selection = null;
+      deselect();
       selectionStart = null;
       selectionMarquee = null;
       selectionLasso = null;
@@ -998,7 +1006,7 @@ function bindKeyboardShortcuts(): void {
     if ((event.metaKey || event.ctrlKey) && event.key === "z") {
       event.preventDefault();
       if (event.shiftKey ? store.redo() : store.undo()) {
-        selection = null;
+        activeMoveSelection = null;
         render();
         renderLayerPanel();
       }

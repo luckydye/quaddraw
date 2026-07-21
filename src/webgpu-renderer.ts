@@ -287,7 +287,8 @@ export class WebGPURenderer {
     debugRegions: readonly QuadDebugRegion[],
     renderedWorldBounds: Bounds | null,
     coversAllInk: boolean,
-    selection: RasterSelection | null = null,
+    selectionShape: readonly Point[] | null = null,
+    activeMoveSelection: RasterSelection | null = null,
     marquee: Bounds | null = null,
     lasso: readonly Point[] | null = null,
     selectionOffset: Point = { x: 0, y: 0 },
@@ -299,19 +300,20 @@ export class WebGPURenderer {
     this.debugRegions = debugRegions;
     if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
     else this.clearDebugFlash();
-    this.drawFrame(camera, selection, marquee, lasso, selectionOffset);
+    this.drawFrame(camera, selectionShape, activeMoveSelection, marquee, lasso, selectionOffset);
   }
 
   /** Redraws the last uploaded cells under a new camera or overlay state. */
   redraw(
     camera: Camera,
-    selection: RasterSelection | null = null,
+    selectionShape: readonly Point[] | null = null,
+    activeMoveSelection: RasterSelection | null = null,
     marquee: Bounds | null = null,
     lasso: readonly Point[] | null = null,
     selectionOffset: Point = { x: 0, y: 0 },
   ): void {
     if (!this.device) return;
-    this.drawFrame(camera, selection, marquee, lasso, selectionOffset);
+    this.drawFrame(camera, selectionShape, activeMoveSelection, marquee, lasso, selectionOffset);
   }
 
   /**
@@ -405,16 +407,17 @@ export class WebGPURenderer {
 
   private drawFrame(
     camera: Camera,
-    selection: RasterSelection | null,
+    selectionShape: readonly Point[] | null,
+    activeMoveSelection: RasterSelection | null,
     marquee: Bounds | null,
     lasso: readonly Point[] | null,
     selectionOffset: Point,
   ): void {
     const device = this.device;
     if (!device || this.canvas.width === 0 || this.canvas.height === 0) return;
-    const isMoving = selection !== null
+    const isMoving = activeMoveSelection !== null
       && (selectionOffset.x !== 0 || selectionOffset.y !== 0);
-    if (isMoving && selection) this.ensureSelectionBuffer(selection);
+    if (isMoving && activeMoveSelection) this.ensureSelectionBuffer(activeMoveSelection);
 
     this.writeUniform(this.baseUniform!, camera, 0, 0, TRANSPARENT_TINT, false);
     if (isMoving) {
@@ -463,12 +466,13 @@ export class WebGPURenderer {
     pass.end();
     device.queue.submit([encoder.finish()]);
 
-    this.drawOverlay(camera, selection, marquee, lasso, selectionOffset, isMoving);
+    this.drawOverlay(camera, selectionShape, activeMoveSelection, marquee, lasso, selectionOffset, isMoving);
   }
 
   private drawOverlay(
     camera: Camera,
-    selection: RasterSelection | null,
+    selectionShape: readonly Point[] | null,
+    activeMoveSelection: RasterSelection | null,
     marquee: Bounds | null,
     lasso: readonly Point[] | null,
     selectionOffset: Point,
@@ -480,7 +484,8 @@ export class WebGPURenderer {
     context.clearRect(0, 0, width, height);
     if (
       this.debugRegions.length === 0
-      && !selection
+      && !selectionShape
+      && !activeMoveSelection
       && !marquee
       && !lasso?.length
     ) return;
@@ -491,26 +496,25 @@ export class WebGPURenderer {
 
     this.drawDebugRegions(this.debugRegions, context, camera.zoom);
 
-    if (selection) {
+    if (isMoving && activeMoveSelection) {
       context.save();
       context.translate(selectionOffset.x, selectionOffset.y);
-      if (
-        !isMoving
-        && selection.cells.length <= SELECTION_HIGHLIGHT_CELL_LIMIT
-      ) {
+      if (activeMoveSelection.cells.length <= SELECTION_HIGHLIGHT_CELL_LIMIT) {
         context.fillStyle = "rgb(91 93 209 / 0.22)";
-        context.fill(this.pathForSelection(selection));
+        context.fill(this.pathForSelection(activeMoveSelection));
       }
       context.strokeStyle = "rgb(75 77 196 / 0.9)";
       context.lineWidth = 1 / camera.zoom;
       context.setLineDash([5 / camera.zoom, 4 / camera.zoom]);
       context.strokeRect(
-        selection.bounds.x,
-        selection.bounds.y,
-        selection.bounds.width,
-        selection.bounds.height,
+        activeMoveSelection.bounds.x,
+        activeMoveSelection.bounds.y,
+        activeMoveSelection.bounds.width,
+        activeMoveSelection.bounds.height,
       );
       context.restore();
+    } else if (selectionShape) {
+      this.strokeSelectionShape(context, selectionShape, camera.zoom);
     }
 
     if (marquee) {
@@ -540,6 +544,26 @@ export class WebGPURenderer {
     }
 
     context.restore();
+  }
+
+  /** Draws the idle marching-ants outline for a persistent selection shape. */
+  private strokeSelectionShape(
+    context: CanvasRenderingContext2D,
+    points: readonly Point[],
+    zoom: number,
+  ): void {
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index++) {
+      context.lineTo(points[index].x, points[index].y);
+    }
+    context.closePath();
+    context.fillStyle = "rgb(91 93 209 / 0.08)";
+    context.fill();
+    context.strokeStyle = "rgb(75 77 196 / 0.95)";
+    context.lineWidth = 1 / zoom;
+    context.setLineDash([6 / zoom, 4 / zoom]);
+    context.stroke();
   }
 
   private readonly cellSink: RenderCellVisitor = (x, y, width, height, color) => {
