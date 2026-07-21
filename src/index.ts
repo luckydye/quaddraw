@@ -193,8 +193,8 @@ function updateBrushPresetState(): void {
 // world-space instance buffer already on the GPU.
 function render(redrawTree = true, redrawMinimap = redrawTree): void {
   if (redrawTree) {
-    const bounds = currentAction ? renderer.viewportBounds(camera) : renderer.renderBounds(camera);
     const scale = camera.zoom;
+    const { bounds, coversAllInk } = treeRenderBounds();
     renderedWorldBounds = bounds;
     visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(bounds, scale) : [];
     renderer.render(
@@ -202,6 +202,7 @@ function render(redrawTree = true, redrawMinimap = redrawTree): void {
       (sink) => store.visitVisible(bounds, scale, sink),
       visibleDebugRegions,
       renderedWorldBounds,
+      coversAllInk,
       selection,
       selectionMarquee,
       selectionLasso,
@@ -221,6 +222,46 @@ function render(redrawTree = true, redrawMinimap = redrawTree): void {
 function renderActionRegion(): void {
   store.consumeActionDirtyBounds();
   render(true, false);
+}
+
+// The GPU instance buffer is world-space, so panning at a fixed zoom only needs
+// the cells already uploaded. When the whole drawing fits within a few
+// viewports we gather all of it once and mark the frame as covering every ink
+// cell, which lets panning skip rebuilds entirely instead of re-collecting the
+// same cells each time the viewport nears the prefetched edge.
+const PREFETCH_INK_VIEWPORT_MARGIN = 3;
+
+function treeRenderBounds(): { bounds: Bounds; coversAllInk: boolean } {
+  if (currentAction) {
+    return { bounds: renderer.viewportBounds(camera), coversAllInk: false };
+  }
+  const margin = renderer.renderBounds(camera);
+  const occupied = store.visibleOccupiedBounds();
+  if (!occupied) return { bounds: margin, coversAllInk: true };
+  const viewport = renderer.viewportBounds(camera);
+  const fits = !debugQuadtree
+    && occupied.width <= viewport.width * (1 + PREFETCH_INK_VIEWPORT_MARGIN * 2)
+    && occupied.height <= viewport.height * (1 + PREFETCH_INK_VIEWPORT_MARGIN * 2);
+  if (fits) return { bounds: unionBounds(margin, occupied), coversAllInk: true };
+  return { bounds: margin, coversAllInk: containsBounds(margin, occupied) };
+}
+
+function unionBounds(a: Bounds, b: Bounds): Bounds {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    width: Math.max(a.x + a.width, b.x + b.width) - x,
+    height: Math.max(a.y + a.height, b.y + b.height) - y,
+  };
+}
+
+function containsBounds(outer: Bounds, inner: Bounds): boolean {
+  return inner.x >= outer.x
+    && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height;
 }
 
 function renderActionOverview(bounds: Bounds): void {
@@ -308,22 +349,45 @@ function normalizedWheelDelta(event: WheelEvent): number {
 }
 
 function renderViewportPreview(): void {
-  // While the panned or zoomed viewport still lies inside the cells already
-  // uploaded to the GPU, redraw them under the new camera without re-querying
-  // the trees. Once it moves past that margin, rebuild the visible set.
-  if (renderer.hasCoverageFor(renderer.viewportBounds(camera))) {
+  const viewport = renderer.viewportBounds(camera);
+  if (renderer.hasCoverageFor(viewport)) {
+    // The uploaded world-space cells still cover the viewport, so just redraw
+    // them under the new camera — a uniform update, no tree walk or upload.
     render(false, false);
+    // Rebuild a fresh, recentered set once we near the prefetched edge, but off
+    // the input path via rAF so this pointermove stays cheap.
+    if (renderer.needsCoverageRefresh(viewport)) scheduleCoverageRebuild();
   } else {
+    // A fast fling outran the prefetch; rebuild now to avoid a blank edge.
+    cancelCoverageRebuild();
     render(true, false);
   }
   window.clearTimeout(viewportSettleTimer);
   viewportSettleTimer = window.setTimeout(() => {
+    cancelCoverageRebuild();
     render(true, true);
   }, 120);
 }
 
+let coverageRebuildHandle = 0;
+
+function scheduleCoverageRebuild(): void {
+  if (coverageRebuildHandle) return;
+  coverageRebuildHandle = requestAnimationFrame(() => {
+    coverageRebuildHandle = 0;
+    render(true, false);
+  });
+}
+
+function cancelCoverageRebuild(): void {
+  if (!coverageRebuildHandle) return;
+  cancelAnimationFrame(coverageRebuildHandle);
+  coverageRebuildHandle = 0;
+}
+
 function beginDrawing(point: Point): void {
   window.clearTimeout(viewportSettleTimer);
+  cancelCoverageRebuild();
   selection = null;
   currentAction = store.createStroke(
     point,
@@ -398,6 +462,7 @@ function finishInteraction(completeSelection = true): void {
   elements.area.classList.remove("is-panning");
   elements.area.classList.remove("is-moving-selection");
   window.clearTimeout(viewportSettleTimer);
+  cancelCoverageRebuild();
   if (finishedDrawing) {
     updateStatus();
     return;
@@ -465,6 +530,7 @@ function finishTouchNavigation(): void {
   isPanning = false;
   elements.area.classList.remove("is-panning");
   window.clearTimeout(viewportSettleTimer);
+  cancelCoverageRebuild();
   render(true, true);
 }
 
@@ -669,6 +735,7 @@ function bindCanvasEvents(): void {
 
     if (activeTool === "eraser" && !isSpacePressed) {
       window.clearTimeout(viewportSettleTimer);
+      cancelCoverageRebuild();
       selection = null;
       currentAction = store.createEraser(point, ERASER_WIDTH);
       renderActionRegion();

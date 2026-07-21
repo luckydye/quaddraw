@@ -11,7 +11,13 @@ import type {
 } from "./types";
 
 const OVERVIEW_SCALE = 0.08;
-const CACHE_MARGIN_FACTOR = 0.25;
+// Cells are gathered for the viewport plus this fraction on every side, so a
+// pan can travel that far before a fresh set is needed. A wider border trades a
+// larger (but rarer) rebuild for more buffer-only pan frames.
+const CACHE_MARGIN_FACTOR = 0.5;
+// Refresh the prefetched cells once the viewport comes within this fraction of
+// the built border's edge, leaving room to rebuild before coverage is lost.
+const COVERAGE_REFRESH_SLACK = 0.2;
 const SELECTION_HIGHLIGHT_CELL_LIMIT = 20_000;
 const DEBUG_FLASH_DURATION_MS = 420;
 
@@ -135,6 +141,7 @@ export class WebGPURenderer {
   private canvasLeft = 0;
   private canvasTop = 0;
   private builtWorldBounds: Bounds | null = null;
+  private builtCoversAllInk = false;
   private debugRegions: readonly QuadDebugRegion[] = [];
   private pathSelection: RasterSelection | null = null;
   private pathSelectionValue: Path2D | null = null;
@@ -279,6 +286,7 @@ export class WebGPURenderer {
     fill: (sink: RenderCellVisitor) => void,
     debugRegions: readonly QuadDebugRegion[],
     renderedWorldBounds: Bounds | null,
+    coversAllInk: boolean,
     selection: RasterSelection | null = null,
     marquee: Bounds | null = null,
     lasso: readonly Point[] | null = null,
@@ -287,6 +295,7 @@ export class WebGPURenderer {
     if (!this.device) return;
     this.uploadCells(fill);
     this.builtWorldBounds = renderedWorldBounds;
+    this.builtCoversAllInk = coversAllInk;
     this.debugRegions = debugRegions;
     if (debugRegions.length > 0) this.flashDebugRegions(camera, debugRegions);
     else this.clearDebugFlash();
@@ -305,14 +314,38 @@ export class WebGPURenderer {
     this.drawFrame(camera, selection, marquee, lasso, selectionOffset);
   }
 
-  /** Whether the last uploaded cells still cover the supplied viewport. */
+  /**
+   * Whether the uploaded cells can be redrawn for the supplied viewport without
+   * re-collecting the tree. Always true once the buffer holds every ink cell —
+   * panning at the same zoom then reveals nothing new, so no rebuild is needed.
+   */
   hasCoverageFor(bounds: Bounds): boolean {
+    if (this.builtCoversAllInk) return true;
     const built = this.builtWorldBounds;
     return built !== null
       && bounds.x >= built.x
       && bounds.y >= built.y
       && bounds.x + bounds.width <= built.x + built.width
       && bounds.y + bounds.height <= built.y + built.height;
+  }
+
+  /**
+   * True once a pan has consumed most of the prefetched border, signalling that
+   * a fresh, recentered cell set should be gathered before coverage is actually
+   * lost. Lets the caller rebuild off the input path instead of stalling a
+   * pointermove once the viewport reaches the edge. When the buffer already
+   * holds every ink cell there is nothing new to gather, so it stays false.
+   */
+  needsCoverageRefresh(bounds: Bounds): boolean {
+    if (this.builtCoversAllInk) return false;
+    const built = this.builtWorldBounds;
+    if (!built) return true;
+    const slackX = bounds.width * COVERAGE_REFRESH_SLACK;
+    const slackY = bounds.height * COVERAGE_REFRESH_SLACK;
+    return bounds.x - built.x < slackX
+      || bounds.y - built.y < slackY
+      || (built.x + built.width) - (bounds.x + bounds.width) < slackX
+      || (built.y + built.height) - (bounds.y + bounds.height) < slackY;
   }
 
   viewportBounds(camera: Camera): Bounds {

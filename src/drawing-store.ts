@@ -265,6 +265,17 @@ export class DrawingStore {
     }
   }
 
+  /** World-space bounds enclosing all ink on visible layers, or null if empty. */
+  visibleOccupiedBounds(): Bounds | null {
+    let result: Bounds | null = null;
+    for (const layer of this.document.layers) {
+      if (!layer.visible || layer.opacity <= 0) continue;
+      const bounds = layer.tree.occupiedBounds();
+      if (bounds) result = mergeBounds(result, bounds);
+    }
+    return result;
+  }
+
   allCells(scale = 1): RasterCell[] {
     const visible: RasterCell[] = [];
     for (const layer of this.document.layers) {
