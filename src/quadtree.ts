@@ -11,6 +11,7 @@ import type {
   RasterCell,
   RasterSelection,
   RasterSelectionCell,
+  RenderCellVisitor,
 } from "./types";
 
 export type QuadLeafNode = { readonly color: number; readonly children?: undefined };
@@ -144,23 +145,39 @@ export class RasterQuadTree {
 
   cellsIn(area: Bounds): RasterCell[] {
     const cells: RasterCell[] = [];
-    collectCells(
-      this.root,
-      this.bounds.x,
-      this.bounds.y,
-      this.bounds.width,
-      this.bounds.height,
-      area,
-      cells,
+    this.visitRenderCells(area, 1, (x, y, width, height, color) =>
+      cells.push({ bounds: { x, y, width, height }, color })
     );
     return cells;
   }
 
   cellsForRendering(area: Bounds, scale: number): RasterCell[] {
-    if (scale >= 1) return this.cellsIn(area);
     const cells: RasterCell[] = [];
+    this.visitRenderCells(area, scale, (x, y, width, height, color) =>
+      cells.push({ bounds: { x, y, width, height }, color })
+    );
+    return cells;
+  }
+
+  /**
+   * Walks the visible leaves at the requested zoom, invoking `visit` for each
+   * uniformly colored cell without allocating an object per leaf.
+   */
+  visitRenderCells(area: Bounds, scale: number, visit: RenderCellVisitor): void {
+    if (scale >= 1) {
+      visitCells(
+        this.root,
+        this.bounds.x,
+        this.bounds.y,
+        this.bounds.width,
+        this.bounds.height,
+        area,
+        visit,
+      );
+      return;
+    }
     const normalizedScale = Math.max(scale, 0.0001);
-    collectRenderCells(
+    visitRenderCells(
       this.root,
       this.bounds.x,
       this.bounds.y,
@@ -169,9 +186,8 @@ export class RasterQuadTree {
       area,
       normalizedScale,
       lodCellPixelLimit(normalizedScale),
-      cells,
+      visit,
     );
-    return cells;
   }
 
   allCells(): RasterCell[] {
@@ -861,28 +877,28 @@ function boundsContain(container: Bounds, contained: Bounds): boolean {
     && contained.y + contained.height <= container.y + container.height;
 }
 
-function collectCells(
+function visitCells(
   node: QuadNode,
   x: number,
   y: number,
   width: number,
   height: number,
   area: Bounds,
-  cells: RasterCell[],
+  visit: RenderCellVisitor,
 ): void {
   if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
 
   if (node.children === undefined) {
-    if ((node.color & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: node.color });
+    if ((node.color & 0xff) !== 0) visit(x, y, width, height, node.color);
     return;
   }
 
   const halfWidth = width / 2;
   const halfHeight = height / 2;
-  collectCells(node.children[0], x, y, halfWidth, halfHeight, area, cells);
-  collectCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, cells);
-  collectCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, cells);
-  collectCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, cells);
+  visitCells(node.children[0], x, y, halfWidth, halfHeight, area, visit);
+  visitCells(node.children[1], x + halfWidth, y, halfWidth, halfHeight, area, visit);
+  visitCells(node.children[2], x, y + halfHeight, halfWidth, halfHeight, area, visit);
+  visitCells(node.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, visit);
 }
 
 type IndexedRasterCell = RasterSelectionCell;
@@ -1141,7 +1157,7 @@ function normalizedOccupiedBounds(node: QuadNode): Bounds | null {
   return occupied;
 }
 
-function collectRenderCells(
+function visitRenderCells(
   node: QuadNode,
   x: number,
   y: number,
@@ -1150,33 +1166,33 @@ function collectRenderCells(
   area: Bounds,
   scale: number,
   cellPixelLimit: number,
-  cells: RasterCell[],
+  visit: RenderCellVisitor,
 ): void {
   if (x >= area.x + area.width || x + width <= area.x || y >= area.y + area.height || y + height <= area.y) return;
   if (node.children === undefined) {
-    if ((node.color & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: node.color });
+    if ((node.color & 0xff) !== 0) visit(x, y, width, height, node.color);
     return;
   }
   const branch = node as QuadBranchNode;
 
   if (Math.max(width, height) * scale <= cellPixelLimit) {
-    if ((branch.average & 0xff) !== 0) cells.push({ bounds: { x, y, width, height }, color: branch.average });
+    if ((branch.average & 0xff) !== 0) visit(x, y, width, height, branch.average);
     return;
   }
 
   const halfWidth = width / 2;
   const halfHeight = height / 2;
-  collectRenderCells(
-    branch.children[0], x, y, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  visitRenderCells(
+    branch.children[0], x, y, halfWidth, halfHeight, area, scale, cellPixelLimit, visit,
   );
-  collectRenderCells(
-    branch.children[1], x + halfWidth, y, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  visitRenderCells(
+    branch.children[1], x + halfWidth, y, halfWidth, halfHeight, area, scale, cellPixelLimit, visit,
   );
-  collectRenderCells(
-    branch.children[2], x, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  visitRenderCells(
+    branch.children[2], x, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, visit,
   );
-  collectRenderCells(
-    branch.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, cells,
+  visitRenderCells(
+    branch.children[3], x + halfWidth, y + halfHeight, halfWidth, halfHeight, area, scale, cellPixelLimit, visit,
   );
 }
 

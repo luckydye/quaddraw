@@ -1,4 +1,4 @@
-import { CanvasRenderer } from "./canvas-renderer";
+import { WebGPURenderer } from "./webgpu-renderer";
 import { ColorPickerElement } from "./color-picker";
 import {
   cameraAfterGesture,
@@ -13,7 +13,6 @@ import type {
   Camera,
   Point,
   QuadDebugRegion,
-  RasterCell,
   RasterSelection,
   Tool,
 } from "./types";
@@ -77,7 +76,7 @@ const elements = {
 };
 
 const store = new DrawingStore();
-const renderer = new CanvasRenderer(
+const renderer = new WebGPURenderer(
   elements.canvas,
   elements.debugFlashCanvas,
   elements.minimap,
@@ -88,7 +87,6 @@ let camera: Camera = { x: 0, y: 0, zoom: 1 };
 let activeTool: Tool = "pen";
 let activeColor = "#393b42";
 let currentAction: BrushAction | null = null;
-let visibleCells: readonly RasterCell[] = [];
 let visibleDebugRegions: readonly QuadDebugRegion[] = [];
 let renderedWorldBounds: Bounds | null = null;
 let selection: RasterSelection | null = null;
@@ -190,75 +188,39 @@ function updateBrushPresetState(): void {
   updateBrushCursor();
 }
 
-function render(redrawTree = true, redrawMinimap = redrawTree, offThread = false): void {
-  syncRendererRasterRevision();
+// A full-viewport instanced GPU redraw is cheap, so every tree change simply
+// re-gathers the visible cells and uploads them. Camera-only changes reuse the
+// world-space instance buffer already on the GPU.
+function render(redrawTree = true, redrawMinimap = redrawTree): void {
   if (redrawTree) {
-    const viewport = currentAction ? renderer.viewportBounds(camera) : renderer.renderBounds(camera);
-    renderedWorldBounds = viewport;
-    visibleCells = store.visibleIn(viewport, camera.zoom);
-    visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(viewport, camera.zoom) : [];
-  }
-
-  const workerAccepted = redrawTree
-    && offThread
-    && renderedWorldBounds !== null
-    && renderer.renderTreeOffThread(
+    const bounds = currentAction ? renderer.viewportBounds(camera) : renderer.renderBounds(camera);
+    const scale = camera.zoom;
+    renderedWorldBounds = bounds;
+    visibleDebugRegions = debugQuadtree ? store.debugLeavesIn(bounds, scale) : [];
+    renderer.render(
       camera,
-      visibleCells,
+      (sink) => store.visitVisible(bounds, scale, sink),
       visibleDebugRegions,
       renderedWorldBounds,
-      () => {
-        renderer.render(
-          camera,
-          visibleCells,
-          visibleDebugRegions,
-          false,
-          renderedWorldBounds,
-          selection,
-          selectionMarquee,
-          selectionLasso,
-          selectionOffset,
-        );
-        if (currentAction && store.activeActionBounds) {
-          renderActionRegion(store.activeActionBounds);
-        }
-      },
+      selection,
+      selectionMarquee,
+      selectionLasso,
+      selectionOffset,
     );
-  renderer.render(
-    camera,
-    visibleCells,
-    visibleDebugRegions,
-    redrawTree && !workerAccepted,
-    renderedWorldBounds,
-    selection,
-    selectionMarquee,
-    selectionLasso,
-    selectionOffset,
-  );
+  } else {
+    renderer.redraw(camera, selection, selectionMarquee, selectionLasso, selectionOffset);
+  }
   if (redrawMinimap) {
     renderer.renderMinimap(camera, store.allCells(renderer.overviewScale));
   }
   updateStatus();
 }
 
-function renderActionRegion(bounds = store.consumeActionDirtyBounds()): void {
-  if (!bounds) return;
-  syncRendererRasterRevision();
-  // Include the full averaged LOD cells touched by the edit at low zoom.
-  const padding = 3 / camera.zoom;
-  const renderBounds = {
-    x: bounds.x - padding,
-    y: bounds.y - padding,
-    width: bounds.width + padding * 2,
-    height: bounds.height + padding * 2,
-  };
-  const cells = store.visibleIn(renderBounds, camera.zoom);
-  const debugRegions = debugQuadtree ? store.debugLeavesIn(renderBounds, camera.zoom) : [];
-  if (!renderer.renderTreeRegion(camera, cells, debugRegions, renderBounds)) {
-    render(true, false, true);
-    return;
-  }
-  updateStatus();
+// Live brush edits stay on the fixed drawing camera, so a viewport redraw picks
+// up the freshly painted cells without any incremental cache bookkeeping.
+function renderActionRegion(): void {
+  store.consumeActionDirtyBounds();
+  render(true, false);
 }
 
 function renderActionOverview(bounds: Bounds): void {
@@ -346,29 +308,18 @@ function normalizedWheelDelta(event: WheelEvent): number {
 }
 
 function renderViewportPreview(): void {
-  syncRendererRasterRevision();
-  for (const request of renderer.panTileRequests(camera)) {
-    renderer.cachePanTile(
-      camera,
-      request,
-      store.visibleIn(request.queryBounds, camera.zoom),
-      debugQuadtree ? store.debugLeavesIn(request.queryBounds, camera.zoom) : [],
-    );
+  // While the panned or zoomed viewport still lies inside the cells already
+  // uploaded to the GPU, redraw them under the new camera without re-querying
+  // the trees. Once it moves past that margin, rebuild the visible set.
+  if (renderer.hasCoverageFor(renderer.viewportBounds(camera))) {
+    render(false, false);
+  } else {
+    render(true, false);
   }
-  // Cached same-zoom tiles cover panned-in areas immediately. Zoom previews
-  // continue transforming the prior detail until their rebuild settles.
-  render(false, false);
   window.clearTimeout(viewportSettleTimer);
   viewportSettleTimer = window.setTimeout(() => {
-    render(true, true, true);
+    render(true, true);
   }, 120);
-}
-
-function syncRendererRasterRevision(): void {
-  renderer.setRasterRevision(
-    store.visualRevision,
-    debugQuadtree ? store.activeLayerId : null,
-  );
 }
 
 function beginDrawing(point: Point): void {
@@ -397,7 +348,7 @@ function finishInteraction(completeSelection = true): void {
       renderActionRegion();
     } else {
       store.cancelAction();
-      if (actionBounds) renderActionRegion(actionBounds);
+      renderActionRegion();
     }
     if (actionBounds) renderActionOverview(actionBounds);
     currentAction = null;
@@ -451,7 +402,7 @@ function finishInteraction(completeSelection = true): void {
     updateStatus();
     return;
   }
-  render(true, true, finishedPanning || finishedDrawing);
+  render(true, true);
 }
 
 function cancelToolInteraction(): void {
@@ -514,7 +465,7 @@ function finishTouchNavigation(): void {
   isPanning = false;
   elements.area.classList.remove("is-panning");
   window.clearTimeout(viewportSettleTimer);
-  render(true, true, true);
+  render(true, true);
 }
 
 function boundsFromPoints(first: Point, second: Point): Bounds {
@@ -667,14 +618,28 @@ function bindCanvasEvents(): void {
     elements.area.classList.remove("has-brush-pointer");
   });
 
+  // Middle-button mouse-down would otherwise start the browser's autoscroll.
+  elements.canvas.addEventListener("mousedown", (event) => {
+    if (event.button === 1) event.preventDefault();
+  });
+
   elements.canvas.addEventListener("pointerdown", (event) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const middleButtonPan = event.pointerType === "mouse" && event.button === 1;
+    if (event.pointerType === "mouse" && event.button !== 0 && !middleButtonPan) return;
     elements.canvas.setPointerCapture(event.pointerId);
 
     if (event.pointerType === "touch") {
       touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (touchPointers.size >= 2) beginTouchNavigation();
       if (touchNavigationActive) return;
+    }
+
+    // The middle button pans from any tool without disturbing its state.
+    if (middleButtonPan) {
+      isPanning = true;
+      elements.area.classList.add("is-panning");
+      lastPointerPosition = { x: event.clientX, y: event.clientY };
+      return;
     }
 
     const point = renderer.screenToWorld(event, camera);
@@ -990,6 +955,16 @@ function isEditableControl(target: EventTarget | null): boolean {
 
 async function initialize(): Promise<void> {
   await store.restore();
+  try {
+    await renderer.init();
+  } catch (error) {
+    console.error(error);
+    elements.hint.textContent = error instanceof Error
+      ? error.message
+      : "This browser does not support WebGPU.";
+    elements.hint.style.opacity = "1";
+    return;
+  }
   store.subscribeSnapshotSize(updateStatus);
   bindCanvasEvents();
   bindControls();

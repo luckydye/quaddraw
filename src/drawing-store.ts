@@ -22,6 +22,7 @@ import type {
   QuadDebugRegion,
   RasterCell,
   RasterSelection,
+  RenderCellVisitor,
 } from "./types";
 import { WORLD_BOUNDS } from "./types";
 
@@ -242,6 +243,26 @@ export class DrawingStore {
       for (const cell of cellsForLayer(layer, bounds, scale)) visible.push(cell);
     }
     return visible;
+  }
+
+  /**
+   * Streams every visible layer's cells bottom-to-top into `visit` without
+   * allocating cell objects. Layer opacity is folded into the alpha channel,
+   * and draw order matches the layer stack, so the renderer composites with a
+   * plain back-to-front pass.
+   */
+  visitVisible(bounds: Bounds, scale: number, visit: RenderCellVisitor): void {
+    for (const layer of this.document.layers) {
+      if (!layer.visible || layer.opacity <= 0) continue;
+      if (layer.opacity < 1) {
+        const opacity = layer.opacity;
+        layer.tree.visitRenderCells(bounds, scale, (x, y, width, height, color) =>
+          visit(x, y, width, height, (color & 0xffffff00) | Math.round((color & 0xff) * opacity))
+        );
+      } else {
+        layer.tree.visitRenderCells(bounds, scale, visit);
+      }
+    }
   }
 
   allCells(scale = 1): RasterCell[] {

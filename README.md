@@ -7,8 +7,12 @@ independent sparse raster quadtree rather than a collection of retained vector
 paths. Pointer samples are transiently smoothed into cubic B-spline curves, then
 flattened into tapered brush capsules that recursively paint immutable quadtree
 nodes. Uniform areas remain compressed as one node;
-only brush edges subdivide to pixel-sized leaves. The canvas renderer traverses
-and fills the visible colored nodes directly.
+only brush edges subdivide to pixel-sized leaves. The renderer uploads the
+visible colored nodes as world-space instanced quads and draws them with WebGPU;
+a vertex shader snaps every shared dyadic edge to a whole device pixel so the
+raster boundaries stay crisp without vector antialiasing. Selection, marquee,
+lasso, and quadtree-topology overlays are drawn on a 2D canvas stacked above the
+WebGPU output.
 
 Textured brushes sample a real two-dimensional opacity mask in stroke-local
 coordinates. The mask rotates with each flattened curve segment, advances by

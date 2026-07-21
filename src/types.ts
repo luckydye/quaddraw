@@ -44,6 +44,18 @@ export type BrushAction = {
   rasterizedSegments: number;
 };
 
+/**
+ * Streams renderable cells without allocating a cell object per leaf. The hot
+ * render path feeds these coordinates straight into a GPU instance buffer.
+ */
+export type RenderCellVisitor = (
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  color: number,
+) => void;
+
 /** A directly renderable, uniformly colored quadtree region. */
 export type RasterCell = {
   bounds: Bounds;
