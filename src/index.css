@@ -90,6 +90,19 @@ button {
     background: #e8e8f9;
     color: #5d5cca;
 }
+.tool.flash {
+    animation: tool-flash 0.4s ease;
+}
+@keyframes tool-flash {
+    0% {
+        background: #e8e8f9;
+        color: #5d5cca;
+    }
+    100% {
+        background: transparent;
+        color: #66666d;
+    }
+}
 .toolbar-rule {
     width: 27px;
     height: 1px;

@@ -24,6 +24,9 @@ const ZOOM_BUTTON_FACTOR = 1.2;
 const PINCH_ZOOM_SENSITIVITY = 0.01;
 const MAX_WHEEL_DELTA = 120;
 const ERASER_WIDTH = 28;
+// A two-finger tap undoes: brief, near-still, without a third finger.
+const TWO_FINGER_TAP_MAX_DURATION = 300;
+const TWO_FINGER_TAP_MAX_MOVEMENT = 12;
 
 const BRUSH_PRESETS = {
   ink: { label: "Ink", density: 100, dynamics: 100, texture: "solid" },
@@ -103,6 +106,10 @@ let lastPointerPosition: Point | null = null;
 const touchPointers = new Map<number, Point>();
 let touchNavigationActive = false;
 let previousTouchGesture: GestureFrame | null = null;
+let touchTapCandidate = false;
+let touchGestureStart: GestureFrame | null = null;
+let touchGestureStartTime = 0;
+let touchMaxPointers = 0;
 let viewportSettleTimer: number | undefined;
 let textureSeed = Date.now() >>> 0;
 
@@ -502,6 +509,10 @@ function beginTouchNavigation(): void {
   cancelToolInteraction();
   touchNavigationActive = true;
   previousTouchGesture = gestureFrame(touchPointers.values());
+  touchGestureStart = previousTouchGesture;
+  touchGestureStartTime = Date.now();
+  touchTapCandidate = true;
+  touchMaxPointers = touchPointers.size;
   isPanning = true;
   elements.area.classList.add("is-panning");
   // A second finger may interrupt a brush preview. Rebuild once from the
@@ -514,6 +525,17 @@ function updateTouchNavigation(): void {
   if (!nextGesture || !previousTouchGesture) {
     previousTouchGesture = nextGesture;
     return;
+  }
+
+  if (touchTapCandidate && touchGestureStart) {
+    const movedCenter = Math.hypot(
+      nextGesture.center.x - touchGestureStart.center.x,
+      nextGesture.center.y - touchGestureStart.center.y,
+    );
+    const pinched = Math.abs(nextGesture.distance - touchGestureStart.distance);
+    if (movedCenter > TWO_FINGER_TAP_MAX_MOVEMENT || pinched > TWO_FINGER_TAP_MAX_MOVEMENT) {
+      touchTapCandidate = false;
+    }
   }
 
   const canvasBounds = elements.canvas.getBoundingClientRect();
@@ -538,13 +560,51 @@ function updateTouchNavigation(): void {
 }
 
 function finishTouchNavigation(): void {
+  const wasTap = touchTapCandidate
+    && Date.now() - touchGestureStartTime <= TWO_FINGER_TAP_MAX_DURATION;
+  const tapFingers = touchMaxPointers;
   touchNavigationActive = false;
   previousTouchGesture = null;
+  touchTapCandidate = false;
+  touchGestureStart = null;
+  touchMaxPointers = 0;
   isPanning = false;
   elements.area.classList.remove("is-panning");
   window.clearTimeout(viewportSettleTimer);
   cancelCoverageRebuild();
+  if (wasTap) {
+    // Two fingers undo, three redo — the inverse pair on the same gesture.
+    if (tapFingers === 2 && performUndo(true)) return;
+    if (tapFingers === 3 && performRedo(true)) return;
+  }
   render(true, true);
+}
+
+function performUndo(flashButton = false): boolean {
+  if (!store.undo()) return false;
+  activeMoveSelection = null;
+  render();
+  renderLayerPanel();
+  if (flashButton) flashToolButton("#undo");
+  return true;
+}
+
+function performRedo(flashButton = false): boolean {
+  if (!store.redo()) return false;
+  activeMoveSelection = null;
+  render();
+  renderLayerPanel();
+  if (flashButton) flashToolButton("#redo");
+  return true;
+}
+
+/** Draws attention to a toolbar button when its action is triggered elsewhere. */
+function flashToolButton(selector: string): void {
+  const button = requiredElement<HTMLButtonElement>(selector);
+  button.classList.remove("flash");
+  // Force a reflow so re-adding the class restarts the animation.
+  void button.offsetWidth;
+  button.classList.add("flash");
 }
 
 function boundsFromPoints(first: Point, second: Point): Bounds {
@@ -699,7 +759,8 @@ function bindCanvasEvents(): void {
 
     if (event.pointerType === "touch") {
       touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (touchPointers.size >= 2) beginTouchNavigation();
+      if (touchPointers.size >= 2 && !touchNavigationActive) beginTouchNavigation();
+      touchMaxPointers = Math.max(touchMaxPointers, touchPointers.size);
       if (touchNavigationActive) return;
     }
 
@@ -942,19 +1003,11 @@ function bindControls(): void {
   });
 
   requiredElement<HTMLButtonElement>("#undo").addEventListener("click", () => {
-    if (store.undo()) {
-      activeMoveSelection = null;
-      render();
-      renderLayerPanel();
-    }
+    performUndo();
   });
 
   requiredElement<HTMLButtonElement>("#redo").addEventListener("click", () => {
-    if (store.redo()) {
-      activeMoveSelection = null;
-      render();
-      renderLayerPanel();
-    }
+    performRedo();
   });
 
   requiredElement<HTMLButtonElement>("#clearButton").addEventListener("click", () => {
@@ -1005,10 +1058,10 @@ function bindKeyboardShortcuts(): void {
 
     if ((event.metaKey || event.ctrlKey) && event.key === "z") {
       event.preventDefault();
-      if (event.shiftKey ? store.redo() : store.undo()) {
-        activeMoveSelection = null;
-        render();
-        renderLayerPanel();
+      if (event.shiftKey) {
+        performRedo(true);
+      } else {
+        performUndo(true);
       }
     }
   });
